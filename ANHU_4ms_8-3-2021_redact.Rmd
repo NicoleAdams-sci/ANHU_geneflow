@@ -1,0 +1,2720 @@
+---
+title: "Adams et al. range expansion"
+author: "Nicole Adams"
+date: "8/3/2021"
+output: 
+  html_document:
+    toc: true
+    code_folding: show
+---
+
+## Load in R libraries
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(data.table)
+library(tidyverse)
+library(viridisLite)
+library(cowplot)
+library(ggpubr) 
+library(patchwork) # combining plots
+library(gridExtra) # combining parts of plots
+library(magick) # editing images
+library(knitr)
+library(kableExtra)
+library(ggpmisc) #add line equation to ggplot
+
+```
+
+&nbsp;
+&nbsp;
+
+# Load in sample metadata and tidy
+```{r, warning=FALSE, message=FALSE}
+seqPool1 <- read_excel("/Users/neasci/Documents/ANHU/ms/ANHU_metadata4ms.xlsx", sheet = "Seq1_meta")
+
+seqPool1.2 <- seqPool1 %>% mutate_at(c("effective%","error%", "Q20%", "Q30%", "GC%"), as.numeric)
+
+meta3 <- read_excel("/Users/neasci/Documents/ANHU/ms/ANHU_metadata4ms.xlsx", sheet = "Seq2_meta")
+meta2 <- meta3 %>% mutate_at(c("effective%","error%", "Q20%", "Q30%", "GC%"), as.numeric)
+
+# Remove undetermined seqs. And remove duplicated individual ANHU_453 was seq in seqPool1 and ANHU_002. Keep the one in seqPool1.
+meta <- meta2 %>% filter(Sample != "Undetermined" & Sample != "AN453" & Species_code == "ANHU") %>% droplevels()
+
+# combine seqPool1 and ANHU_001-003 metadata
+meta.full <- full_join(seqPool1.2, meta) # 524 x 49 - incl duplicates
+
+```
+
+&nbsp;
+&nbsp;
+
+# Sample map
+```{r, warning=FALSE, message=FALSE}
+# Load libraries for map
+library(raster) # map
+library(ggthemes) # map
+library(ggsn) # map
+
+# Map data
+mapdata <- getData("GADM", country = "usa", level = 1)
+mymap <- fortify(mapdata)
+states <- map_data("state")
+states_df <- subset(states, region %in% c("california", "washington", "arizona", "nevada", "oregon"))
+counties <- map_data("county")
+county_df <- subset(counties, region %in% c("california", "washington", "arizona", "nevada", "oregon"))
+
+
+base <- ggplot(data = states_df, mapping = aes(x = long, y = lat, group = group)) + 
+  coord_fixed(1.3) + 
+  geom_polygon(color = "black", fill = "gray")
+
+baseb <- ggplot(data = states_df, mapping = aes(x = long, y = lat, group = group)) + 
+  coord_fixed(1.3) + 
+  geom_polygon(color = "white", fill = "gray")
+
+g0 <- base + theme_map() +
+  geom_polygon(data = county_df, fill = NA, color = "white") +
+  geom_polygon(color = "black", fill = NA)   # get the state border back on top
+
+g0b <- baseb + theme_map() 
+
+# order sites N -> S
+county.order <- meta.full %>%
+  arrange(desc(Latitude))
+
+meta.full$County <- factor(meta.full$County, levels=c("Skagit", "Snohomish", "Kitsap", "King", "Kittitas", "Mason", "Pacific", "Humboldt", "Butte", "Nevada","El Dorado",  "Yolo", "Sonoma", "Sacramento", "Marin", "Contra Costa", "San Francisco", "Alameda", "Santa Clara", "Madera", "Tulare", "Clark", "Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego", "Maricopa", "Yuma", "Cochise"))
+
+
+# Create original vs extended range category
+meta.full$cat <- ifelse(meta.full$State!="CA" |meta.full$County=="Humboldt", "ex", "og")
+meta.full$cat <- as.factor(meta.full$cat)
+
+# Create 6 regions category
+BAY.county <- c("Butte", "Nevada","El Dorado",  "Yolo", "Sonoma", "Sacramento", "Marin", "Contra Costa", "San Francisco", "Alameda", "Santa Clara")
+VAL.county <-  c("Madera", "Tulare")
+PAC.county <- c("Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego")
+meta.full$region <- ifelse(meta.full$State == "WA", "WAS", "foo")
+meta.full$region <- ifelse(meta.full$State == "AZ"| meta.full$State== "NV", "EAS", meta.full$region)
+meta.full$region <- ifelse(meta.full$County == "Humboldt", "HUM", meta.full$region)
+meta.full$region <- ifelse(meta.full$County %in% BAY.county, "BAY", meta.full$region)
+meta.full$region <- ifelse(meta.full$County %in% VAL.county, "VAL", meta.full$region)
+meta.full$region <- ifelse(meta.full$County %in% PAC.county, "PAC", meta.full$region)
+meta.full$region <- factor(meta.full$region, levels=c("WAS", "HUM", "BAY", "VAL", "PAC", "EAS"))
+
+map.meta <- g0 + 
+  geom_point(data = meta.full, mapping = aes(x = Longitude, y = Latitude, fill = region, shape = cat), size = 6, alpha = 0.88, inherit.aes = FALSE) +
+  #scale_fill_manual(values=c("tomato3", "dodgerblue4"), labels=c("extended", "native"), name="") +
+  scale_fill_viridis_d(end = 0.93, name="Region") +
+  scale_shape_manual(values=c(21, 24), labels=c("extended", "native"), name="") +
+  guides(fill = guide_legend(override.aes = list(shape = c(22)))) +
+ # labs(title = "") +
+  theme(legend.position = "left") +
+  north(data=states_df, location = "topright", scale = 0.1) 
+
+#ggsave2(plot = mapYhum, filename = "~/Documents/ANHU/popGenResults/ANHU_byRegion_4-23-21.png")
+
+detach("package:raster", unload = T)
+
+map.meta 
+```
+
+&nbsp;
+
+# Sequencing summaries
+## Get raw seq stats for the whole experiment
+Lane duplicates included
+```{r, warning=FALSE, message=FALSE}
+# total number of reads across all seq samples (incl duplicates)
+read.sum <- sum(meta.full$rawReads)/1000000000  #bill
+
+# Q30% = (Base count of Phred value > 30) / (Total base count)
+Q30.range <- range(meta.full$`Q30%`) # 68.50 98.83
+#dim(meta.full%>% filter(`Q30%` < 90)) # 3 samples -> >99% of samples have 90%+ reads of Q30
+
+sum.tab <- t(as.data.frame(c(length(meta.full$Sample), read.sum, ">99%")))
+colnames(sum.tab) <- c("Samples", "Total_reads_B", "Samples_90%+_Q30")
+rownames(sum.tab) <- c("raw")
+sum.tab <- as.data.frame(sum.tab)
+sum.tab$Total_reads_B <- as.numeric(as.character(sum.tab$Total_reads_B))
+
+kable(sum.tab, digits = 3, caption = "Sequencing summary") %>% kable_styling()
+```
+
+&nbsp;
+
+#### Get avgs for raw seq quality ANHU_001-003
+Summarize per individual over duplicate lanes. Then merge avg with deduplicated data
+```{r, warning=FALSE, message=FALSE}
+meta.avg <- meta %>% 
+    group_by(Sample) %>% 
+    summarise_if(is.numeric, mean, na.rm=TRUE) %>% dplyr::select(-Longitude, -Latitude) %>% rename(rawReads.avg = rawReads, rawDataG.avg = rawDataG, `effective%.avg` = `effective%`, `error%.avg` = `error%`, `Q20%.avg`=`Q20%`,`Q30%.avg`=`Q30%`, `GC%.avg`=`GC%`)
+
+meta.single <- meta[!duplicated(meta$Sample), ] # N=244 
+
+meta.single2 <- full_join(meta.single, meta.avg)
+meta.single3 <- meta.single2 %>% dplyr::select(-rawReads, -rawDataG, -`effective%`, -`error%`, -`Q20%`, -`Q30%`, -`GC%`)
+meta.single4 <- meta.single3 %>% rename(rawReads = rawReads.avg, rawDataG = rawDataG.avg, `effective%` = `effective%.avg`, `error%` = `error%.avg`, `Q20%` = `Q20%.avg`,`Q30%` =`Q30%.avg`, `GC%`=`GC%.avg`)
+
+meta.full2 <- full_join(seqPool1.2, meta.single4) #N=283
+
+sum.tab2 <- t(as.data.frame(c(length(meta.full2$State), mean(meta.full2$rawReads), mean(meta.full2$`Q30%`)))) 
+colnames(sum.tab2) <- c("Samples", "Avg_rawReads", "Avg_Q30%")
+rownames(sum.tab2) <- c("Merged")
+sum.tab2 <- as.data.frame(sum.tab2)
+sum.tab2$Avg_rawReads <- as.numeric(as.character(sum.tab2$Avg_rawReads))
+
+#kable(sum.tab2, digits = 2, caption = "Sequencing summary") %>% kable_styling()
+
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+## Trimming 
+Bash commands for Trim Galore! to remove any adapters and trim based on quality.
+```{bash, eval=FALSE, message=FALSE}
+# since have each sample in two lanes need to specify which lane for the paired seqs
+for sample in `ls *_L5_1.fq.gz | cut -f1 -d'_'`; do num=`ls $sample\_CKDL200151659*_L5_1.fq.gz | cut -f2 -d '_' | cut -f2,3,4 -d '-'`; echo $num; echo $sample; done
+
+# Test one sample (trim galore!)
+~/scripts/trimgalore.sbatch.test
+
+# Pull down the new fastqc html file made after trimming
+scp adamsne2@bridges.psc.xsede.org:"/pylon5/bi5613p/adamsne2/ANHU/raw_data2/128.120.88.251/dedup/*.html" .
+
+# Run trimming for all samples PER on Lane
+for sample in `ls *_L5_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore.sbatch $sample; done 
+
+for sample in `ls *_L6_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore.sbatch $sample; done
+
+for sample in `ls *_L7_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore.sbatch $sample; done
+
+for sample in `ls *_L8_1.fq.gz | cut -f1,2,3 -d '_'`; do echo $sample; sbatch ~/scripts/trimgalore.sbatch $sample; done
+
+```
+
+&nbsp;
+
+### Trimming batch script
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=TRIM
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=TRIM_%j_out
+#################
+# a file for errors from the job
+#SBATCH --error=TRIM_%j_err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#number of nodes
+#SBATCH -N 1
+#################
+#Note 4400Mb/core
+#SBATCH --mem=128G
+#################
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands within a for loop, run in folder with fastq files
+##for sample in `ls *_L5_1.fq.gz | cut -f1 -d'_'`; do num=`ls $sample\_CKDL200151659*_L5_1.fq.gz | cut -f2 -d '_' | cut -f2,3,4 -d '-'`; echo $num; echo $sample; done
+##################
+#echo commands to stdout
+
+set -x
+
+module load fastqc/0.11.3
+module load cutadapt/1.5
+#module load trimmomatic
+module load flash
+module load python3/3.4.2
+
+###Identify program directories
+fastq="/pylon5/bi5613p/adamsne2/ANHU/raw_data2/128.120.88.251/raw_data"
+num=$2
+sample=$1
+
+#Note: Take a look at the names of the sample files and adjust this loop accordingly
+#For example, mine all had "CKDL190142674-1a-AK12626-AK16295_H3VF5CCX2_L8_2.fq.gz" or "USPD16094205-N707-AK392_HY5K5CCXY_L7_2.fq.gz" tacked on.
+
+###Trim low quality fragments and Illumina TruSeq adapters (-q = quality, --cores 1-4 python3 uses 2)
+mkdir ../trimgalore
+mkdir ../dedup
+cd ../dedup
+
+# Make sure to change the Lane!
+
+/home/adamsne2/programs/TrimGalore-0.6.5/trim_galore -q 15 --paired --fastqc \
+-a AATGATACGGCGACCACCGAGATCTACACTCTTTCCCTACACGACGCTCTTCCGATCT \
+-a2 GATCGGAAGAGCACACGTCTGAACTCCAGTCACATCACGATCTCGTATGCCGTCTTCTGCTTG \
+$fastq/$sample\_L6_1.fq.gz $fastq/$sample\_L6_2.fq.gz
+
+```
+
+&nbsp;
+
+#### Trimming for seqPool1 with Trimmomatic
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=TRIM
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=TRIM_%j_out
+#################
+# a file for errors from the job
+#SBATCH --error=TRIM_%j_err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p RM-shared
+#################
+#number of nodes
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 4
+#################
+#Note 4400Mb/core
+#SBATCH --mem=16G
+#################
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands within a for loop, run in folder with fastq files
+#for sample in `ls *_1.fq.gz | cut -f1,2 -d'_'`; do num=`ls $sample\_CKDL190140066*_1.fq.gz|cut -f3 -d'_'|cut -f 2,3,4 -d '-'`; echo $num; echo $sample; sbatch ../1.trim.anhu.sbatch $sample $num;done
+##################
+#echo commands to stdout
+
+set -x
+
+module load trimmomatic
+module load flash
+
+###Identify program directories
+FASTUNIQ=/home/adamsne2/programs/FastUniq/source # Directory for fastuniq
+TRIMMOMATIC=/opt/packages/trimmomatic/0.36
+fastq="/pylon5/bi5613p/adamsne2/ANHU/raw_data/H202SC19090700"
+num=$2
+sample=$1
+
+###Remove duplicates (potential PCR artifacts) using fastuniq
+#Note: Take a look at the names of the sample files and adjust this loop accordingly
+#For example, mine all had "CKDL190140066-1a-N703-AK415_H3VM3CCX2_L7_1.fq.gz" or 2.fq.gz  tacked on.
+mkdir ../dedup
+cd $fastq
+
+        echo $sample\_CKDL190140066-"$num"\_H3VM3CCX2_L7_1.fq > pair."$sample".txt 
+        echo $sample\_CKDL190140066-"$num"\_H3VM3CCX2_L7_2.fq >> pair."$sample".txt 
+        gunzip $sample\_CKDL190140066-"$num"\_H3VM3CCX2_L7_1.fq.gz 
+        gunzip $sample\_CKDL190140066-"$num"\_H3VM3CCX2_L7_2.fq.gz 
+        $FASTUNIQ/fastuniq -i pair."$sample".txt -t q -o ../dedup/$sample\_R1.fastq -p ../dedup/$sample\_R2.fastq 
+        gzip -f $sample\_CKDL190140066-"$num"\_H3VM3CCX2_L7_1.fq 
+        gzip -f $sample\_CKDL190140066-"$num"\_H3VM3CCX2_L7_2.fq 
+        gzip -f ../dedup/$sample\_R1.fastq 
+        gzip -f ../dedup/$sample\_R2.fastq 
+        rm pair."$sample".txt 
+
+
+###Trim low quality fragments and adapters
+mkdir ../trim
+cd ../dedup
+
+        java -jar $TRIMMOMATIC/trimmomatic-0.36.jar \
+        PE \
+        $sample\_R1.fastq.gz \
+        $sample\_R2.fastq.gz \
+        ../trim/$sample\_R1_paired.fastq.gz \
+        ../trim/$sample\_R1_unpaired.fastq.gz \
+        ../trim/$sample\_R2_paired.fastq.gz \
+        ../trim/$sample\_R2_unpaired.fastq.gz \
+        ILLUMINACLIP:$TRIMMOMATIC/adapters/TruSeq3-PE.fa:2:30:10 \
+        LEADING:3 \
+        TRAILING:3 \
+        SLIDINGWINDOW:4:15 \
+        MINLEN:36
+
+
+###Collapse overlapping read pairs into a single longer read using flash
+mkdir ../flash
+cd ../trim
+flash $sample\_R1_paired.fastq.gz $sample\_R2_paired.fastq.gz -o ../flash/$sample
+```
+
+&nbsp;
+
+loop
+```{bash, eval=FALSE, message=FALSE}
+for sample in `ls *_1.fq.gz | cut -f1,2 -d'_'`; do num=`ls $sample\_CKDL190140066*_1.fq.gz|cut -f3 -d'_'|cut -f 2,3,4 -d '-'`; echo $num; echo $sample; sbatch ../1.trim.anhu.sbatch $sample $num;done
+```
+
+
+&nbsp;
+&nbsp;
+
+## Mapping
+Bash commands to map samples separately per lane using bwa -mem.
+```{bash, eval=FALSE, message=FALSE}
+# test one sample
+for sample in `ls Undetermined_Undetermined_H7TLFCCX2_L5_1_val_1.fq.gz | cut -f1,4 -d'_'`; do echo $sample; sbatch ~/scripts/map.bwa.sbatch.test $sample; done
+
+
+for sample in `ls AN124_CKDL200151659-1a-N711-N502_H7TLFCCX2_L5_1_val_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; echo $sample; echo $lane; sbatch ~/scripts/map.bwa.sbatch $sample $lane; done
+
+
+for sample in `ls *_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`; echo $sample; echo $lane;echo $sample2; sbatch ~/scripts/map.bwa.sbatch $sample $lane $sample2; done
+
+# bc I have 4 lanes - map ANHU_002 and 003 separately
+for sample in `ls *_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`;  if [ "$lane" == L5 ] || [ "$lane" == L6 ]; then echo $sample; echo $lane; echo $sample2; sbatch ~/scripts/map.bwa.sbatch $sample $lane $sample2; fi; done
+
+for sample in `ls *_1.fq.gz | cut -f1,2,3,4 -d'_'`; do lane=`ls $sample\_1_val_1.fq.gz | cut -f4 -d"_"`; sample2=`ls $sample\_1_val_1.fq.gz | cut -f1 -d'_'`;  if [ "$lane" == L7 ] || [ "$lane" == L8 ]; then echo $sample; echo $lane; echo $sample2; sbatch ~/scripts/map.bwa.sbatch $sample $lane $sample2; fi; done
+```
+
+&nbsp;
+
+### Mapping batch script
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=map_bwa
+#################  
+#a file for job output, you can check job progress for each sample
+#SBATCH --output=map-bwa.%j.out
+#################
+# a file for errors from the job for each sample
+#SBATCH --error=map-bwa.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#number of nodes- for RM-shared -N 1
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 20
+#################
+#SBATCH --mem=128G
+#################
+#assigns allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+##################
+##################
+#run sbatch in for loop
+#now run normal batch commands within a for loop, run in folder with fastq files to assign correct plate number
+#for sample in `ls *_1.fq.gz | cut -f2 -d'_'`; do echo $sample; sbatch ../2.map.anhu.bwa_dedup.sbatch $sample;done
+##################
+#echo commands to stdout
+set -x 
+
+module load bwa/0.7.13
+module load samtools
+module load picard/2.18.26
+
+##Variables: Plate number and directory for bamUtil
+PLATE="ANHU_001"
+BAMUTIL="/home/adamsne2/programs/bamUtil/bin"
+REFERENCE="/pylon5/bi5613p/adamsne2/ANHU/reference/GCF_003957555.1_bCalAnn1_v1.p/GCF_003957555.1_bCalAnn1_v1.p_genomic.fna"
+lane=$2
+sample=$1
+sample2=$3
+
+cd /pylon5/bi5613p/adamsne2/ANHU/raw_data2/128.120.88.251/dedup
+
+##Align each sample to genome. Note that genome reference must already be built through bwa
+mkdir ../bwa_map
+
+ID="$PLATE.$sample2.$lane"
+
+##map trimmed reads BY lane
+bwa mem  -t 20 $REFERENCE "$sample"_1_val_1.fq.gz "$sample"_2_val_2.fq.gz > /pylon5/bi5613p/adamsne2/ANHU/raw_data2/128.120.88.251/bwa_map/aln_"$sample2"_"$lane".sam
+
+cd /pylon5/bi5613p/adamsne2/ANHU/raw_data2/128.120.88.251/bwa_map
+
+#########sort, add read group information and index it#########
+samtools sort -o aln_"$sample2"_"$lane".bam aln_"$sample2"_"$lane".sam -@ 10
+
+##Add read groups
+java -jar /home/adamsne2/programs/picard.jar AddOrReplaceReadGroups INPUT=aln_"$sample2"_"$lane".bam RGID="$ID" RGLB="$PLATE" RGPL=illumina RGPU="$PLATE"."$sample2"."lane" RGSM="$sample2" OUTPUT="$PLATE"."$sample2"."$lane"_RG.bam VALIDATION_STRINGENCY=SILENT 
+
+samtools index "$PLATE"."$sample2"."$lane"_RG.bam
+
+```
+
+&nbsp;
+
+### Map summaries script
+Bash commands for samtools flagstat to get mapping summaries. Then take the results and make a table and put in one file to be put into Rstudio.
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=map_bwa
+#################  
+#a file for job output, you can check job progress for each sample
+#SBATCH --output=map-bwa.%j.out
+#################
+# a file for errors from the job for each sample
+#SBATCH --error=map-bwa.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#number of nodes- for RM-shared -N 1
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 10
+#################
+#SBATCH --mem=128G
+#################
+#assigns allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+##################
+##################
+#run sbatch in for loop
+#now run normal batch commands within a for loop, run in folder with fastq files to assign correct plate number
+#for sample in `ls *_1.fq.gz | cut -f2 -d'_'`; do echo $sample; sbatch ../2.map.anhu.bwa_dedup.sbatch $sample;done
+##################
+#echo commands to stdout
+set -x 
+
+
+
+module load samtools
+
+cd /pylon5/bi5613p/adamsne2/ANHU/raw_data2/128.120.88.251/bwa_map
+
+touch mapSummary.txt
+
+for sample in `ls ANHU_001*.bam | cut -f1,2,3 -d'.'`
+do
+  samtools flagstat "$sample".bam -@ 10  > "$sample"_mapSum.txt
+ awk 'FNR == 1{ print FILENAME }' "$sample"_mapSum.txt >> mapSummary.txt
+ cat "$sample"_mapSum.txt >> mapSummary.txt
+        
+done
+
+for sample in ANHU_001*_RG_mapSum.txt; do awk 'FNR == 1{ print FILENAME } {printf "%-20s %-40s\n", $1, $3}' OFS="\t" $sample | awk '
+{ 
+    for (i=1; i<=NF; i++)  {
+        a[NR,i] = $i
+    }
+}
+NF>p { p = NF }
+END {    
+    for(j=1; j<=p; j++) {
+        str=a[1,j]
+        for(i=2; i<=NR; i++){
+            str=str" "a[i,j];
+        }
+        print str
+    }
+}' >> mapSummary2.txt; done
+
+rm "$sample"_mapSum.txt
+
+```
+
+&nbsp;
+
+## Mapping summary
+```{r, warning=FALSE, message=FALSE}
+# Data input and wrangling
+sum.01 <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/WGLC_SeqProcessing_code/mapSummary_seqPool1.2.txt", col_names = FALSE))
+sum.1 <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/WGLC_SeqProcessing_code/mapSummary2.txt", col_names = FALSE))
+sum.2 <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/WGLC_SeqProcessing_code/mapSummary_ANHU_002.2.txt", col_names = FALSE))
+sum.3 <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/WGLC_SeqProcessing_code/mapSummary_ANHU_003.2.txt", col_names = FALSE))
+
+sum.01b <- sum.01 %>% separate(X1, c("library", "sample", "sample2", "lane", "stuff", "file")) %>% dplyr::select(-library, -lane, -stuff, -file) %>% unite(sample, c("sample", "sample2")) %>% filter(sample != "NA_NA")
+
+msumx <- rbind(sum.1, sum.2, sum.3) # 1016 x 14
+
+# fix and filter
+sam2rm2 <- meta2 %>% filter(Sample == "Undetermined" | Sample == "AN453" | Species_code == "ALHU" | Species_code == "COHU") %>% dplyr::select(Sample)
+msumx2 <- msumx %>% separate(X1, c("library", "sample2", "sample", "lane", "stuff", "file")) %>% dplyr::select(-sample2, -library, -lane, -stuff, -file) %>% filter(sample != "NA") %>% filter(sample != "Undetermined") %>% filter(!sample %in% sam2rm2$Sample) 
+
+msumx2.avg <- msumx2 %>% 
+    group_by(sample) %>% 
+    summarise_if(is.numeric, mean, na.rm=TRUE) 
+
+msum.all <- rbind(sum.01b, msumx2.avg) #N=283
+
+colnames(msum.all) <- c("sample", "QCpassedReads", "secondary", "supplementary", "duplicates", "mapped", "paired", "read1", "read2", "properlyPaired", "itselfYmateMapped", "singletons", "mateMappedDiffChr", "mateMappedDiffChr_mapQ5")
+
+msum.all$pctMap <- (msum.all$mapped/msum.all$QCpassedReads)*100
+msum.all$pctPaired <- (msum.all$properlyPaired/msum.all$paired)*100
+
+msum.tab <- t(as.data.frame(c(length(msum.all$sample), mean(msum.all$pctMap), mean(msum.all$pctPaired)))) 
+colnames(msum.tab) <- c("Samples", "percentMap", "percentPaired")
+rownames(msum.tab) <- c("Merged")
+msum.tab2 <- as.data.frame(msum.tab)
+
+#kable(msum.tab2, digits = 2, caption = "Mapping summary") %>% kable_styling()
+
+# add mapping sum to meta data
+msum.all$Bay_Lab_ID <- ifelse(grepl("ANHU", msum.all$sample), msum.all$sample, NA)
+meta.full2$sample <- ifelse(is.na(meta.full2$Sample), meta.full2$Bay_Lab_ID, meta.full2$Sample)
+msum.all$sample <-str_replace(msum.all$sample, "AN_", "ANHU_")
+
+meta.full3 <- full_join(meta.full2, msum.all, by="sample") #N=283
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+### Merge bams and markDuplicates
+sbatch script
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=merge.ddup
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=merge.ddup.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=merge.ddup.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#default is one core, should be fine for samtools -nope
+#################
+#number of nodes- for RM-shared -N 1
+#SBATCH -N 1
+##SBATCH --ntasks-per-node 10
+#################
+#SBATCH --mem=128G
+#################
+#assigns allocation
+#SBATCH -A xxx 
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#export MALLOC_PER_THREAD=1
+#echo commands to stdout
+
+set -x
+
+sample=$1
+lane=$2
+sample2=$3
+
+module load samtools
+module load gatk
+
+cd /pylon5/bi5613p/adamsne2/ANHU/raw_data2/128.120.88.251/bwa_map 
+
+ls ANHU_001."$sample2".*_RG.bam > "$sample2".bamlist
+
+samtools merge -b "$sample2".bamlist "$sample2".merge.bam -@ 10
+samtools index "$sample2".merge.bam -@ 10
+
+java -jar /home/adamsne2/programs/picard.jar MarkDuplicates \
+      I="$sample2".merge.bam \
+      O="$sample2".merge.mrkdup.bam \
+      M="$sample2".merge.mrkdup_metrics.txt
+```
+
+&nbsp;
+&nbsp;
+&nbsp;
+
+## Genome coverage with Picard collect wgs
+Batch script to calculate coverage using Picard. Used this for ANHU_002-003. Took about 1 hr per sample
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=wgsMetrics
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=wgs.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=wgs.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#default is one core
+#################
+#number of nodes- for RM-shared -N 1
+#SBATCH -N 1
+#################
+#number of threads x 48 for LM
+#SBATCH --mem=480G
+#################
+#assigns allocation 
+#SBATCH -A xxx 
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#export MALLOC_PER_THREAD=1
+#echo commands to stdout
+
+set -x
+
+module load gatk
+
+REFERENCE="/pylon5/bi5613p/adamsne2/ANHU/reference/GCF_003957555.1_bCalAnn1_v1.p/GCF_003957555.1_bCalAnn1_v1.p_genomic.fna"
+
+cd /pylon5/bi5613p/adamsne2/ANHU/raw_data2/X202SC19113263-Z01-F001/bwa_map
+
+for sample in *merge.mrkdup.bam ; do sample2=`ls $sample | cut -f1,2,3 -d'.'`;
+java -jar /home/adamsne2/programs/picard.jar CollectWgsMetrics\
+      I=$sample \
+      O=$sample2.collect_wgs_metrics.txt \
+      R=$REFERENCE
+NUM_THREADS=10
+done
+
+```
+
+&nbsp;
+
+### Coverage summary
+```{r, warning=FALSE, message=FALSE}
+wgs_001 <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/popGenResults/ANHU_001.collect_wgs_metrics.txt", col_names = TRUE)) #N=86
+
+# wgs already has headers bc I did it in Excel
+wgs_001 <- wgs_001 %>% separate(sample, c("sample", "stuff1", "stuff2")) %>% dplyr::select(-stuff1, -stuff2) %>% filter(sample != "ANHU") 
+ 
+wgs_002y003 <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/popGenResults/ANHU_002y003.collect_wgs_metrics.txt", col_names = FALSE))
+
+# Remove NA rows
+wgs_002y003 <- wgs_002y003 %>% filter(X1 != "NA")  # N=171
+
+# my for loop included the file itself (ANHU_002y003.collect_wgs_metrics.txt) so remove that. (I fixed the loop for seqPool1)
+wgs_002y003 <- wgs_002y003 %>% filter(X1 != "ANHU_002y003.collect_wgs_metrics.txt")
+
+colnames(wgs_002y003) <- c("sample", "GENOME_TERRITORY", "MEAN_COVERAGE", "SD_COVERAGE", "MEDIAN_COVERAGE", "MAD_COVERAGE", "PCT_EXC_ADAPTER", "PCT_EXC_MAPQ", "PCT_EXC_DUPE", "PCT_EXC_UNPAIRED", "PCT_EXC_BASEQ", "PCT_EXC_OVERLAP", "PCT_EXC_CAPPED", "PCT_EXC_TOTAL", "PCT_1X", "PCT_5X", "PCT_10X", "PCT_15X", "PCT_20X", "PCT_25X", "PCT_30X", "PCT_40X", "PCT_50X", "PCT_60X", "PCT_70X", "PCT_80X", "PCT_90X", "PCT_100X", "HET_SNP_SENSITIVITY", "HET_SNP_Q")
+
+wgs_002y003 <- wgs_002y003 %>% separate(sample, c("sample", "stuff1", "stuff2")) %>% dplyr::select(-stuff1, -stuff2) 
+
+sam2rm3 <- meta2 %>% filter(Sample == "Undetermined" |Species_code == "ALHU" | Species_code == "COHU") %>% select(Sample) %>% distinct()
+wgs.all <- full_join(wgs_001, wgs_002y003) %>% filter()  %>% filter(!sample %in% sam2rm3$Sample)
+
+# ADD SEQPOOL1 WGS
+wgs_seqP1 <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/WGLC_SeqProcessing_code/seqPool1.collect_wgs_metrics.txt", col_names = FALSE)) #N=40
+
+wgs_seqP1 <- wgs_seqP1 %>% separate(X1, c("sample", "X1"), sep = "\\s") %>% separate(sample, c("pool", "sample", "stuff"), sep = "\\.") %>% dplyr::select(-pool,-stuff)
+
+colnames(wgs_seqP1) <- c("sample", "GENOME_TERRITORY", "MEAN_COVERAGE", "SD_COVERAGE", "MEDIAN_COVERAGE", "MAD_COVERAGE", "PCT_EXC_ADAPTER", "PCT_EXC_MAPQ", "PCT_EXC_DUPE", "PCT_EXC_UNPAIRED", "PCT_EXC_BASEQ", "PCT_EXC_OVERLAP", "PCT_EXC_CAPPED", "PCT_EXC_TOTAL", "PCT_1X", "PCT_5X", "PCT_10X", "PCT_15X", "PCT_20X", "PCT_25X", "PCT_30X", "PCT_40X", "PCT_50X", "PCT_60X", "PCT_70X", "PCT_80X", "PCT_90X", "PCT_100X", "HET_SNP_SENSITIVITY", "HET_SNP_Q")
+
+wgs.full <- rbind(wgs_seqP1, wgs.all) #N=284
+wgs.full <- wgs.full %>% filter(sample != "Undetermined" & sample != "AN453") #N=283
+
+wgs.tab <- t(as.data.frame(c(length(wgs.full$sample), mean(wgs.full$MEAN_COVERAGE), mean(wgs.full$PCT_5X)))) 
+colnames(wgs.tab) <- c("Samples", "Avg_meanCov", "Avg_pct5X")
+rownames(wgs.tab) <- c("Merged")
+wgs.tab2 <- as.data.frame(wgs.tab)
+
+#kable(wgs.tab2, digits = 2, caption = "Coverage summary") %>% kable_styling()
+
+# Add cov data to metadata
+wgs.full$sample <- str_replace(wgs.full$sample, "AN_", "ANHU_")
+
+meta.full4 <- full_join(meta.full3, wgs.full, by="sample")
+```
+
+&nbsp;
+
+#### Combine summary metrics into single table
+```{r, warning=FALSE, message=FALSE}
+sum.met <- cbind(sum.tab2, msum.tab2, wgs.tab2) %>% subset(., select = which(!duplicated(names(.))))
+
+kable(sum.met, digits = 2, caption = "Summary") %>% kable_styling()
+```
+
+&nbsp;
+
+## Remove failed samples 
+with low raw reads, that poorly mapped, and had low coverage samples. Also remove miss ID'd samples based on species.
+```{r, warning=FALSE, message=FALSE}
+lowCov <- meta.full4 %>% filter(pool == "ANHU_001"| pool == "ANHU_002"| pool== "ANHU_003") %>% filter(MEAN_COVERAGE < 1)
+lowCov2 <- meta.full4 %>% filter(pool =="seqPool1") %>% filter(WG_coverage < 0.9999)
+
+meta.fullrm <- meta.full4 %>% filter(rawReads > 1000) %>%  filter(mapped/QCpassedReads > 0.5) %>% filter(!sample %in% lowCov$sample) %>% filter(!sample %in% lowCov2$sample) #N=248
+
+# Remove miss ID'd species
+misID2rm <- c("ANHU_250", "ANHU_ 91463", "H-203", "H-204", "ANHU_358")
+meta.fullrmYsprm <- meta.fullrm %>% filter(!Bay_Lab_ID.x %in% misID2rm) #N=243
+
+```
+
+&nbsp;
+&nbsp;
+
+## Remove potentially related samples ID'd by pop
+### ngsRelate batch scripts
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=ngsrel
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=ngsrel.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=ngsrel.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 72:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#number of nodes
+#SBATCH --nodes=1
+#SBATCH --ntasks=6
+#################
+#SBATCH --mem=288G
+#################
+#assigns allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#echo commands to stdout
+
+set -x
+
+GLF="/pylon5/bi5613p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcov_CA.Winters.maf03.mind27.glf.glf.gz"
+FREQ="/pylon5/bi5613p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcov_CA.Winters.maf03.mind27.glf.freq"
+IDS="/pylon5/bi5613p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcov_CA.Winters.bamlist"
+OUTFILE="ANHU_rmfailedYspYlowcov_CA.Winters.maf03.mind27.glf.rel.wId"
+NUM=27
+
+NGSRELATE="/home/adamsne2/programs/ngsRelate"
+
+#zcat ANHU_rmfailed.maf03.mind243.glf.mafs.gz | cut -f6 |sed 1d > ANHU_rmfailed.maf03.mind243.glf.freq
+
+
+# n=number samples, p=threads, z=name of file with IDs
+$NGSRELATE/ngsRelate -g $GLF -n $NUM -f $FREQ -z $IDS -p 10 -O $OUTFILE
+```
+
+&nbsp;
+
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=ngsrel
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=ngsrel.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=ngsrel.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 72:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#number of nodes
+#SBATCH --nodes=1
+#SBATCH --ntasks=6
+#################
+#SBATCH --mem=288G
+#################
+#assigns allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#echo commands to stdout
+
+set -x
+
+GLF="/pylon5/bi5613p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcov_CA.BH.maf03.mind28.glf.glf.gz"
+FREQ="/pylon5/bi5613p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcov_CA.BH.maf03.mind28.glf.freq"
+IDS="/pylon5/bi5613p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcov_CA.BH.bamlist"
+OUTFILE="ANHU_rmfailedYspYlowcov_CA.BH.maf03.mind28.glf.rel.wId"
+NUM=28
+
+NGSRELATE="/home/adamsne2/programs/ngsRelate"
+
+#zcat ANHU_rmfailed.maf03.mind243.glf.mafs.gz | cut -f6 |sed 1d > ANHU_rmfailed.maf03.mind243.glf.freq
+
+
+# n=number samples, p=threads, z=name of file with IDs
+$NGSRELATE/ngsRelate -g $GLF -n $NUM -f $FREQ -z $IDS -p 10 -O $OUTFILE
+```
+
+&nbsp;
+
+Remove one sample from potentially related pairs
+```{r, warning=FALSE, message=FALSE}
+rmfailedYsp.rel <- as.data.frame(read.table("~/Documents/ANHU/popGenResults/ANHU_rmfailedYsp.maf03.mind243.glf.rel.wId", header = T))
+
+# Identified (AN131 and AN402) as well as (ANHU_203 and UCP70773) as potentially related samples based on population level NGSrelate results - Winters and Beverly Hills, CA. So remove one sample from each pair
+winters.rel <- as.data.frame(read.table("~/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcov_CA.Winters.maf03.mind27.glf.rel.wId", header = T))
+BH.rel <- as.data.frame(read.table("~/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcov_CA.BH.maf03.mind28.glf.rel.wId", header = T))
+#winters.rel %>% filter(rab >0.5)
+#BH.rel %>% filter(R1 > 0.45)
+
+# Remove AN131 (Winters), seqPool1.ANHU_203 (BH) AND sort samples so they are in the same order as ANHU_rmfailedYspYlowcovYrelAutosYrel.bamlist (for admix and PCA)
+potRel2rm <- c("AN131", "ANHU_203")
+meta.fullrmYsprmYrel <- meta.fullrmYsprm %>% slice(23:nrow(meta.fullrmYsprm)) %>% arrange(sample) %>% rbind(slice(meta.fullrmYsprm, 1:22), .) %>% filter(!sample %in% potRel2rm)  #N=241
+
+```
+
+&nbsp;
+&nbsp;
+
+## Summary for non-failed samples
+```{r, warning=FALSE, message=FALSE}
+sum.tab3 <- t(as.data.frame(c(length(meta.fullrmYsprmYrel$State), mean(meta.fullrmYsprmYrel$rawReads), mean(meta.fullrmYsprmYrel$`Q30%`), mean(meta.fullrmYsprmYrel$pctMap), mean(meta.fullrmYsprmYrel$pctPaired), mean(meta.fullrmYsprmYrel$MEAN_COVERAGE), mean(meta.fullrmYsprmYrel$PCT_5X)))) 
+colnames(sum.tab3) <- c("Samples", "Avg_rawReads", "Avg_Q30%", "percentMap", "percentPaired", "Avg_meanCov", "Avg_pct5X")
+rownames(sum.tab3) <- c("FailedRm")
+sum.tab3 <- as.data.frame(sum.tab3)
+#sum.tab3$Avg_rawReads <- as.numeric(as.character(sum.tab3$Avg_rawReads))
+
+#kable(sum.tab3, digits = 2, caption = "Sequencing summary, failed samples removed") %>% kable_styling()
+
+# combine with previous summary table
+sum.met2 <- rbind(sum.met, sum.tab3)
+kable(sum.met2, digits = 2, caption = "Sequencing summary") %>% kable_styling()
+```
+
+&nbsp;
+&nbsp;
+
+Bash code to loop over files to remove scaffolds that aren't autosomes
+```{bash, eval=FALSE, message=FALSE}
+
+cd /pylon5/bi5613p/adamsne2/ANHU/analyses/bams/ANHU.merge.mrkdup.bams/
+ 
+for sample in *mrkdup.bam; do echo $sample; sbatch ~/scripts/keepAutosomes.sbatch $sample; done
+
+```
+
+&nbsp;
+
+Batch script to keep only autosomes
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling
+#################
+#set a job name
+#SBATCH --job-name=keepAuto
+#################
+#a file for job output, you can check job progress for each sample
+#SBATCH --output=keepAuto.%j.out
+#################
+# a file for errors from the job for each sample
+#SBATCH --error=keepAuto.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#number of nodes- for RM-shared -N 1
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 6
+#################
+#SBATCH --mem=288G
+#################
+#assigns allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+##################
+##################
+#run sbatch in for loop
+#now run normal batch commands within a for loop, run in folder with fastq files to assign correct plate number
+#for sample in `ls *_1.fq.gz | cut -f2 -d'_'`; do echo $sample; sbatch ../2.map.anhu.bwa_dedup.sbatch $sample;done
+##################
+#echo commands to stdout
+set -x
+
+
+module load samtools
+
+
+sample=$1
+
+#cd /pylon5/bi5613p/adamsne2/ANHU/analyses/bams/ANHU.merge.mrkdup.bams/
+
+OUTFILE=$(echo $sample|sed 's/.bam//g')
+
+
+samtools idxstats "$sample" | cut -f 1 | egrep -v '^NW_*|NC_044274.1|NC_044276.1' | xargs samtools view -b "$sample" -@ 6 > ../ANHU.merge.mrkdup.autos.bams/"$OUTFILE".autos.bam
+
+cd  /pylon5/bi5613p/adamsne2/ANHU/analyses/bams/ANHU.merge.mrkdup.autos.bams/
+
+samtools index "$OUTFILE".autos.bam -@ 6
+```
+
+&nbsp;
+
+Make bamlist and rename to be *mrkdup.autos.bam
+```{bash, eval=FALSE, message=FALSE}
+cp ANHU_rmfailedYspYlowcov.bamlist 
+
+sed 's/.bam/.autos.bam/g' ANHU_rmfailedYspYlowcovAutos.bamlist > ANHU_rmfailedYspYlowcovAutos.bamlist
+
+```
+
+&nbsp;
+&nbsp;
+
+# Analyses
+## Admixture
+### sbatch script
+ANHU_rmfailedYspYlowcovYrelAutos.maf02.mind49.beagle.gz. I ran NGSadmix on clusters K=1-6, 5 times each.
+```{bash, eval=FALSE, message=FALSE}
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling
+#################
+#set a job name
+#SBATCH --job-name=ngsadmix
+#################
+#a file for job output, you can check job progress
+#SBATCH --output=ngsadmix.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=ngsadmix.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 24:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p RM
+#################
+#number of nodes
+#SBATCH --nodes=2
+#SBATCH --ntasks=32
+#################
+##SBATCH --mem=400G
+#################
+#assigns allocation 
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#echo commands to stdout
+
+set -x
+
+#NGSADMIX=~/programs/NGSadmix
+#NGSTOOLS=~/programs/ngsTools
+#j="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/ANHU_rmfailedYspYlowcovYrelAutos.maf02.mind49.beagle.gz"
+#outdir="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/admix"
+#outfile="ANHU_rmfailedYspYlowcovYrelAutos.maf02.mind49.ngsadmix"
+#K=2
+#limit=10
+#run=7
+
+NGSADMIX=~/programs/angsd/misc/NGSadmix
+j="/ocean/projects/deb200006p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/ANHU_rmfailedYspYlowcovYrelAutos.maf02.mind49.beagle.gz"
+outdir="/ocean/projects/deb200006p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/admix"
+outfile="ANHU_rmfailedYspYlowcovYrelAutos.maf02.mind49.ngsadmix"
+
+for run in $(seq 1 6); do
+for K in $(seq 1 6); do echo $K
+"$NGSADMIX" -likes $j -K $K -outfiles $outdir/"$outfile"_K"$K"_"$run" -P 16
+done
+done
+```
+
+&nbsp;
+
+K=2 was deemed the optimal number of clusters according to the Evanno method through [CLUMPAK](http://clumpak.tau.ac.il/bestK.html). Based on 9522643 SNPs.
+```{r, warning=FALSE, message=FALSE}
+admix.files2<-list.files(path="~/Documents/ANHU/popGenResults", pattern='ANHU_rmfailedYspYlowcov.*qopt', full.names = TRUE)
+pltList2 <- list()
+
+for (FILE in admix.files2){
+  admix <- as.data.frame(read.table(FILE))
+  k.value <- unlist(strsplit(FILE, "[/|,.,_]+"))[c(12)]
+  pltName <- paste( 'plot', k.value, sep = '.' )
+  admix.meta <- cbind(meta.fullrmYsprmYrel,admix)
+  admix.meta2 <- reshape2::melt(admix.meta, id=c("Previous_ID", "Bay_Lab_ID.x", "sample", "pool", "Town", "State", "County", "Sex") )
+  admix.meta3 <- admix.meta2 %>% filter(variable == "V1" | variable == "V2"| variable == "V3"| variable == "V4"| variable == "V5")
+ # admix.meta4 <- admix.meta3 %>% filter(Previous_ID != "HUM1000453") 
+  admix.meta4 <- admix.meta3 %>% arrange(State, County, Town)
+  admix.meta4$State <- factor(admix.meta4$State, levels = c("WA", "CA", "NV", "AZ"))
+  admix.meta4$County <- factor(admix.meta4$County, levels=c("Skagit", "Snohomish", "Kitsap", "King", "Kittitas", "Mason", "Pacific", "Humboldt", "Butte", "Nevada","El Dorado",  "Yolo", "Sonoma", "Sacramento", "Marin", "Contra Costa", "San Francisco", "Alameda", "Santa Clara", "Madera", "Tulare", "Clark", "Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego", "Maricopa", "Yuma", "Cochise"))
+  
+   pltList2[[ pltName ]] <-ggplot(admix.meta4, aes(factor(Previous_ID), as.numeric(value), fill = factor(variable))) +
+  geom_col(color = "gray", size = 0.1, show.legend = F) +
+  facet_grid(~State, switch = "x", scales = "free", space = "free") +
+  theme_minimal() + labs(title = k.value, x = "Individuals", y = "Ancestry") + 
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_discrete(expand = expansion(add = 1)) +
+  theme(panel.spacing.x = unit(0.1, "lines"),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank(),
+    strip.text.x = element_text(angle = 90))  +
+  scale_fill_viridis_d(option = "plasma", end = 0.93)
+}
+
+#admix.p1 <- cowplot::plot_grid(pltList2$plot.K2, pltList2$plot.K3, ncol = 1)
+#admix.p2 <- cowplot::plot_grid(pltList2$plot.K4 ,pltList2$plot.K5, ncol = 1)
+#cowplot::plot_grid(pltList2$plot.K6, ncol = 1)
+
+admix.p <- ggarrange(pltList2$plot.K2 + theme(axis.title.y = element_blank(), axis.title.x = element_blank(), strip.text.x = element_blank()),
+          pltList2$plot.K3 + theme(axis.title.y = element_blank(), axis.title.x = element_blank(), strip.text.x = element_blank()),
+          pltList2$plot.K4 + theme(axis.title.y = element_blank(), axis.title.x = element_blank(), strip.text.x = element_blank()),
+          pltList2$plot.K5 + theme(axis.title.y = element_blank(), axis.title.x = element_blank()),
+          ncol = 1, align="h")
+
+admix.p2 <- annotate_figure(admix.p, left = text_grob("Ancestry", rot = 90), bottom = text_grob("Individuals"))
+
+admix.p2
+```
+
+&nbsp;
+
+(I also ran ANHU_rmfailedYspYlowcovYrelAutos.maf03.mind241.ngsadmix with N=241. Run this for K=2-6, each K 10 times. and the optimal number of clusters was K=3, but in similar non-grouping).
+
+&nbsp;
+&nbsp;
+
+## PCA, mind=243
+N = 243 (before potentially related samples were removed), maf = 0.03, mind=243. Read 243 samples and 22,902 sites. Number of sites after MAF filtering (0.05): 19,512
+```{r, warning=FALSE, message=FALSE}
+# make sure sample order matches in meta data and pca
+covarAutos <- as.matrix(read.table("~/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovAutos.maf03.mind243.pcangsd.cov"))
+
+meta.fullrmYsprm <- meta.fullrmYsprm %>% slice(23:nrow(meta.fullrmYsprm)) %>% arrange(sample) %>% rbind(slice(meta.fullrmYsprm, 1:22), .)
+
+# Putting region and og vs native range back in *don't judge me*
+# Create original vs extended range category
+meta.fullrmYsprm$cat <- ifelse(meta.fullrmYsprm$State!="CA" |meta.fullrmYsprm$County=="Humboldt", "ex", "og")
+meta.fullrmYsprm$cat <- as.factor(meta.fullrmYsprm$cat)
+
+#BAY.county <- c("Butte", "Nevada","El Dorado",  "Yolo", "Sonoma", "Sacramento", "Marin", "Contra Costa", "San Francisco", "Alameda", "Santa Clara")
+#VAL.county <-  c("Madera", "Tulare")
+#PAC.county <- c("Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego")
+meta.fullrmYsprm$region <- ifelse(meta.fullrmYsprm$State == "WA", "WAS", "foo")
+meta.fullrmYsprm$region <- ifelse(meta.fullrmYsprm$State == "AZ"| meta.fullrmYsprm$State== "NV", "EAS", meta.fullrmYsprm$region)
+meta.fullrmYsprm$region <- ifelse(meta.fullrmYsprm$County == "Humboldt", "HUM", meta.fullrmYsprm$region)
+meta.fullrmYsprm$region <- ifelse(meta.fullrmYsprm$County %in% BAY.county, "BAY", meta.fullrmYsprm$region)
+meta.fullrmYsprm$region <- ifelse(meta.fullrmYsprm$County %in% VAL.county, "VAL", meta.fullrmYsprm$region)
+meta.fullrmYsprm$region <- ifelse(meta.fullrmYsprm$County %in% PAC.county, "PAC", meta.fullrmYsprm$region)
+meta.fullrmYsprm$region <- factor(meta.fullrmYsprm$region, levels=c("WAS", "HUM", "BAY", "VAL", "PAC", "EAS"))
+
+
+## Create eigenvectors from covariance matrix and define populations (could be by state for by ClimateGroup)
+eigAuto <- eigen(covarAutos,symm=T)
+eigAuto$val <- eigAuto$val/sum(eigAuto$val)
+var.Autos <- signif(eigAuto$val,digits=3)*100
+PC.Autos <- as.data.frame(eigAuto$vectors)
+colnames(PC.Autos) <- gsub("V","PC",colnames(PC.Autos))
+cbind(meta.fullrmYsprm,PC.Autos) -> pcaAuto
+PC.Autos$Pop <- factor(meta.fullrmYsprm$Town)
+
+
+# plot by region
+pca.243.p <- pcaAuto %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4, alpha=0.88, inherit.aes = T) + labs(fill="Region") +
+   scale_fill_viridis_d( end = 0.9, direction = 1) +
+    scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+    theme_bw() + xlab(paste("PC1","(",var.Autos[1],"%",")")) + ylab(paste("PC2","(",var.Autos[2],"%",")")) +
+    guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=22), order = 1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="right", legend.box="vertical", axis.text=element_text(size=12), axis.title=element_text(size=14)) 
+
+pca.243.p2 <- pca.243.p + labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+# plot by region RM legend
+pca.243.p.noL <- pcaAuto %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4, alpha=0.88, inherit.aes = T) +
+   scale_fill_viridis_d( end = 0.9, direction = 1) +
+    scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+    theme_bw() + xlab(paste("PC1","(",var.Autos[1],"%",")")) + ylab(paste("PC2","(",var.Autos[2],"%",")")) +
+    guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=22), order = 1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="none")
+
+pca.243.p.noL2 <- pca.243.p.noL + labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+# Plot by region - PC2 vPC3
+pca.243.p23 <- pcaAuto %>% ggplot(aes(PC2,PC3,fill=region, shape=cat))+ geom_point(size=4, alpha=0.88, inherit.aes = T) + labs(fill="Region") +
+   scale_fill_viridis_d( end = 0.9, direction = 1) +
+    scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+    theme_bw() + xlab(paste("PC2","(",var.Autos[2],"%",")")) + ylab(paste("PC3","(",var.Autos[3],"%",")")) +
+    guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=22), order = 1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="right", legend.box="vertical", axis.text=element_text(size=10), axis.title=element_text(size=12), legend.spacing = unit(-0.36, "cm")) #+ labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+# Plot by region - PC3 vPC4
+pca.243.p34 <- pcaAuto %>% ggplot(aes(PC3,PC4,fill=region, shape=cat))+ geom_point(size=4, alpha=0.88, inherit.aes = T) + labs(fill="Region") +
+   scale_fill_viridis_d( end = 0.9, direction = 1) +
+    scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+    theme_bw() + xlab(paste("PC3","(",var.Autos[3],"%",")")) + ylab(paste("PC4","(",var.Autos[4],"%",")")) +
+    guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=22), order = 1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="right", legend.box="vertical", axis.text=element_text(size=12), axis.title=element_text(size=14)) #+ labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+# plot by sex
+pca.243.S.p <- pcaAuto %>% filter(Sex != "NA") %>% ggplot(aes(PC1,PC2,fill=Sex, shape=Sex))+ geom_point(size=4, alpha=0.88, inherit.aes = T) +
+   #scale_fill_viridis_d(option = "magma", end=0.95, name="Sex", labels=c("F", "M", "U")) +
+  scale_fill_grey(start=0, end=0.9) +
+    scale_shape_manual(values=c(21, 23, 24), name="Sex", labels=c("F", "M", "U")) +
+    theme_bw() + xlab(paste("PC1","(",var.Autos[1],"%",")")) + ylab(paste("PC2","(",var.Autos[2],"%",")")) +
+   # guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) #+ labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+# plot by pool
+pcaAuto$pool <- factor(pcaAuto$pool, levels = c("ANHU_001", "ANHU_002", "ANHU_003","seqPool1"))
+pca.243.P.p <- pcaAuto %>% ggplot(aes(PC1,PC2,fill=pool, shape=pool))+ geom_point(size=4, alpha=0.88, inherit.aes = T) + labs(fill="Pool") +
+   #scale_fill_viridis_d(option = "magma", end=0.95, name="pool") +
+  scale_fill_grey(start=0, end=0.9) +
+    scale_shape_manual(values=c(21, 23, 24, 22), name="Pool") +
+    theme_bw() + xlab(paste("PC1","(",var.Autos[1],"%",")")) + ylab(paste("PC2","(",var.Autos[2],"%",")")) +
+   # guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) #+ labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+# plot by collection date - year then month
+pca.243.D.p <- pcaAuto %>% ggplot(aes(PC1,PC2,color=CaptureDate))+ geom_point(size=4, alpha=0.88, inherit.aes = T) +
+    theme_bw() + xlab(paste("PC1","(",var.Autos[1],"%",")")) + ylab(paste("PC2","(",var.Autos[2],"%",")")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+
+pca.243.D.p2 <- pcaAuto %>% ggplot(aes(PC1,PC2,color=month(CaptureDate)))+ geom_point(size=4, alpha=0.88, inherit.aes = T) +
+ # scale_color_viridis_c(option = "magma", end=0.93) +
+    theme_bw() + xlab(paste("PC1","(",var.Autos[1],"%",")")) + ylab(paste("PC2","(",var.Autos[2],"%",")")) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + labs(title = "N=243", subtitle = "maf=0.03, mind=243")
+
+```
+
+&nbsp;
+
+### PCA, mind=49
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=pcangsd
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=pcangsd.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=pcangsd.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p RM
+#################
+#number of nodes
+#SBATCH -N 1
+##SBATCH --ntasks-per-node 3
+#################
+##SBATCH --mem=144G
+#################
+#assigns allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#echo commands to stdout
+
+set -x
+
+module load python3/intel_3.6.3
+
+PCANGSD="~/programs/pcangsd/pcangsd.py"
+j="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/ANHU_rmfailedYspYlowcovYrelAutos.maf02.mind49.beagle.gz"
+outfile=$(echo $j|sed 's/.beagle.gz//g').pcangsd
+
+
+python ~/programs/pcangsd/pcangsd.py -beagle $j -o $outfile -threads 3
+```
+
+&nbsp;
+
+N = 241, maf=0.02, mind=49. Need to remove more potentially related samples. Number of sites after MAF filtering (0.05): 9,528,114
+```{r, warning=FALSE, message=FALSE}
+# load pcangsd covariance matrix from PCANGSD on beagle file
+covar.49 <- as.matrix(read.table("~/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovYrelAutos.maf02.mind49.pcangsd.cov"))
+
+# Putting region and og vs native range back in *don't judge me*
+# Create original vs extended range category
+meta.fullrmYsprmYrel$cat <- ifelse(meta.fullrmYsprmYrel$State!="CA" |meta.fullrmYsprmYrel$County=="Humboldt", "ex", "og")
+meta.fullrmYsprmYrel$cat <- as.factor(meta.fullrmYsprmYrel$cat)
+
+#BAY.county <- c("Butte", "Nevada","El Dorado",  "Yolo", "Sonoma", "Sacramento", "Marin", "Contra Costa", "San Francisco", "Alameda", "Santa Clara")
+#VAL.county <-  c("Madera", "Tulare")
+#PAC.county <- c("Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego")
+meta.fullrmYsprmYrel$region <- ifelse(meta.fullrmYsprmYrel$State == "WA", "WAS", "foo")
+meta.fullrmYsprmYrel$region <- ifelse(meta.fullrmYsprmYrel$State == "AZ"| meta.fullrmYsprmYrel$State== "NV", "EAS", meta.fullrmYsprmYrel$region)
+meta.fullrmYsprmYrel$region <- ifelse(meta.fullrmYsprmYrel$County == "Humboldt", "HUM", meta.fullrmYsprmYrel$region)
+meta.fullrmYsprmYrel$region <- ifelse(meta.fullrmYsprmYrel$County %in% BAY.county, "BAY", meta.fullrmYsprmYrel$region)
+meta.fullrmYsprmYrel$region <- ifelse(meta.fullrmYsprmYrel$County %in% VAL.county, "VAL", meta.fullrmYsprmYrel$region)
+meta.fullrmYsprmYrel$region <- ifelse(meta.fullrmYsprmYrel$County %in% PAC.county, "PAC", meta.fullrmYsprmYrel$region)
+meta.fullrmYsprmYrel$region <- factor(meta.fullrmYsprmYrel$region, levels=c("WAS", "HUM", "BAY", "VAL", "PAC", "EAS"))
+
+## Create eigenvectors from covariance matrix and define populations (could be by state for by ClimateGroup)
+eig.49 <- eigen(covar.49,symm=T)
+eig.49$val <- eig.49$val/sum(eig.49$val)
+var.49 <- signif(eig.49$val,digits=3)*100
+PC.49 <- as.data.frame(eig.49$vectors)
+colnames(PC.49) <- gsub("V","PC",colnames(PC.49))
+cbind(meta.fullrmYsprmYrel,PC.49) -> pca49
+PC.49$Pop <- factor(meta.fullrmYsprmYrel$Town)
+
+pca.49.p <- pca49 %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4,alpha=0.88, inherit.aes = T) +
+  #scale_colour_manual(values = cols2) +
+  scale_fill_viridis_d( end = 0.9, direction = 1) +
+  scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+  theme_bw() + xlab(paste("PC1","(",var.49[1],"%",")")) + ylab(paste("PC2","(",var.49[2],"%",")")) +
+ guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="bottom", legend.box="vertical") + labs(title = "N=241", subtitle = "maf=0.02, mind=49") 
+
+## Remove more potentially related individuals based on PCA
+# potentially related pairs: UCK89662[203] & UCP71084[220], AN333[88] & TL016[184], ANHU_323[8] & ANHU_325[9]. line number in bracket from ANHU_rmfailedYspYlowcovYrelAutos.bamlist
+# Remove only one in pair: UCK89662 [203], TL016 [184], ANHU_323 [8] 
+covar.rm <- covar.49[-c(8, 184, 203),-c(8, 184, 203)]
+samples2rmP <- c("UCK89662", "TL016", "ANHU_323")
+meta.fullrmYsprmYrelY3 <- meta.fullrmYsprmYrel %>% filter(!sample %in% samples2rmP)
+
+eig.rm <- eigen(covar.rm,symm=T)
+eig.rm$val <- eig.rm$val/sum(eig.rm$val)
+var.rm <- signif(eig.rm$val,digits=3)*100
+PC.rm <- as.data.frame(eig.rm$vectors)
+colnames(PC.rm) <- gsub("V","PC",colnames(PC.rm))
+cbind(meta.fullrmYsprmYrelY3,PC.rm) -> pca.rm
+PC.rm$Pop <- factor(meta.fullrmYsprmYrelY3$Town)
+
+pca.rm.p <- pca.rm %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4,alpha=0.88, inherit.aes = T) +
+  #scale_colour_manual(values = cols2) +
+  scale_fill_viridis_d(end = 0.9, direction = 1) +
+  scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+  theme_bw() + xlab(paste("PC1","(",var.rm[1],"%",")")) + ylab(paste("PC2","(",var.rm[2],"%",")")) +
+ guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="bottom", legend.box="vertical") + labs(title = "N=238", subtitle = "maf=0.02, mind 49")
+
+# potentially related pairs: UCK89662[203] & UCP71084[220], AN333[88] & TL016[184], ANHU_323[8] & ANHU_325[9], AN402[98] & ANHU_267[7], AN593[124] & AN86237[144], UW112721[229] & UW113545[230], AN129[32] & UW119089[235], ANHU_160[5] & UCK89810[211]   
+# Remove only one in pair: UCK89662[203],UCP71084[220]*, TL016[184], ANHU_323[8], ANHU_267[7], AN86237[144], UW113545[230], UW119089[235], UCK89810[211]
+# Both UCK89662[203] & UCP71084[220] are outliers and need to be rm...
+
+covar.rm2 <- covar.49[-c(7,8,144,184,203,211,220,230,235),-c(7,8,144,184,203,211,220,230,235)]
+samples2rmP2 <- c("UCK89662", "UCP71084", "TL016", "AN86237", "UW113545", "UW119089", "UCK89810", "ANHU_323", "ANHU_267")
+meta.fullrmYsprmYrelY8 <- meta.fullrmYsprmYrel %>% filter(!sample %in% samples2rmP2)
+
+eig.rm2 <- eigen(covar.rm2,symm=T)
+eig.rm2$val <- eig.rm2$val/sum(eig.rm2$val)
+var.rm2 <- signif(eig.rm2$val,digits=3)*100
+PC.rm2 <- as.data.frame(eig.rm2$vectors)
+colnames(PC.rm2) <- gsub("V","PC",colnames(PC.rm2))
+cbind(meta.fullrmYsprmYrelY8,PC.rm2) -> pca.rm2
+PC.rm2$Pop <- factor(meta.fullrmYsprmYrelY8$Town)
+
+pca.rm.p2 <- pca.rm2 %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4,alpha=0.88, inherit.aes = T) + labs(fill="Region") +
+  #scale_colour_manual(values = cols2) +
+  scale_fill_viridis_d(end = 0.9, direction = 1) +
+  scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+  theme_bw() + xlab(paste("PC1","(",var.rm2[1],"%",")")) + ylab(paste("PC2","(",var.rm2[2],"%",")")) +
+  guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=22), order = 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="right", legend.spacing = unit(-0.33, "cm")) #+ labs(title = "N=232", subtitle = "maf=0.02, mind=49") 
+
+# RM legend for plotting
+pca.rm.p2.noL <- pca.rm2 %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4,alpha=0.88, inherit.aes = T) +
+  #scale_colour_manual(values = cols2) +
+  scale_fill_viridis_d(end = 0.9, direction = 1) +
+  scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+  theme_bw() + xlab(paste("PC1","(",var.rm2[1],"%",")")) + ylab(paste("PC2","(",var.rm2[2],"%",")")) +
+  guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="none") + labs(title = "N=232", subtitle = "maf=0.02, mind=49") 
+
+```
+
+&nbsp;
+
+### PCA, mind=122 (not shown)
+N = 239, maf=0.02, mind=122. Removed AN333, UCK89662 from bamlist and reran pcangsd. Number of sites after MAF filtering (0.05): 9,178,861
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling
+#################
+#set a job name
+#SBATCH --job-name=pcangsd
+#################
+#a file for job output, you can check job progress
+#SBATCH --output=pcangsd.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=pcangsd.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p RM
+#################
+#number of nodes
+##SBATCH -N 1
+#SBATCH --ntasks 10
+#################
+##SBATCH --mem=144G
+#################
+#assigns Xsede allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#echo commands to stdout
+
+set -x
+
+module load anaconda3/2020.11.lua
+PCANGSD="~/programs/pcangsd/pcangsd.py"
+j="/ocean/projects/deb200006p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/ANHU_rmfailedYspYlowcovYrelAutosYrel.maf02.mind122.beagle.gz"
+outfile=$(echo $j|sed 's/.beagle.gz//g').pcangsd
+
+
+python3 ~/programs/pcangsd/pcangsd.py -beagle $j -o $outfile -threads 10
+
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+covarxx <- as.matrix(read.table("~/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovYrelAutosYrel.maf02.mind122.pcangsd.cov"))
+samples2rmxx <- c("AN333", "UCK89662")
+meta.fullrmYsprmYrelYxx <- meta.fullrmYsprmYrel %>% filter(!sample %in% samples2rmxx)
+
+eigxx <- eigen(covarxx,symm=T)
+eigxx$val <- eigxx$val/sum(eigxx$val)
+varxx <- signif(eigxx$val,digits=3)*100
+PCxx <- as.data.frame(eigxx$vectors)
+colnames(PCxx) <- gsub("V","PC",colnames(PCxx))
+cbind(meta.fullrmYsprmYrelYxx,PCxx) -> pcaxx
+PCxx$Pop <- factor(meta.fullrmYsprmYrelYxx$Town)
+
+pca.pxx <- pcaxx %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4,alpha=0.88, inherit.aes = T) +
+  #scale_colour_manual(values = cols2) +
+  scale_fill_viridis_d( end = 0.9, direction = 1) +
+  scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+  theme_bw() + xlab(paste("PC1","(",varxx[1],"%",")")) + ylab(paste("PC2","(",varxx[2],"%",")")) +
+  guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="bottom", legend.box="vertical") + labs(title = "N=239", subtitle = "maf=0.02, mind=122") 
+
+# id and remove the potentially related samples
+# (ANHU_323 ANHU_325), (ANHU_267 AN402)
+# rm ANHU_323 and ANHU_267
+covar.rmxx <- covarxx[-c(7, 8),-c(7, 8)]
+id2rmPxx <- c("ANHU_323", "ANHU_267")
+meta.fullrmYsprmYrelYxx2 <- meta.fullrmYsprmYrelYxx %>% filter(!sample %in% id2rmPxx)
+
+eig.rmxx <- eigen(covar.rmxx,symm=T)
+eig.rmxx$val <- eig.rmxx$val/sum(eig.rmxx$val)
+var.rmxx <- signif(eig.rmxx$val,digits=3)*100
+PC.rmxx <- as.data.frame(eig.rmxx$vectors)
+colnames(PC.rmxx) <- gsub("V","PC",colnames(PC.rmxx))
+cbind(meta.fullrmYsprmYrelYxx2,PC.rmxx) -> pca.rmxx
+PC.rmxx$Pop <- factor(meta.fullrmYsprmYrelYxx2$Town)
+
+pca.rm.pxx <- pca.rmxx %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4,alpha=0.88, inherit.aes = T) +
+  #scale_colour_manual(values = cols2) +
+  scale_fill_viridis_d(end = 0.9, direction = 1) +
+  scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+  theme_bw() + xlab(paste("PC1","(",var.rmxx[1],"%",")")) + ylab(paste("PC2","(",var.rmxx[2],"%",")")) +
+  guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="bottom", legend.box="vertical") + labs(title = "N=237", subtitle = "maf=0.02, mind=122") 
+
+pca.rm.pxx.noL <- pca.rmxx %>% ggplot(aes(PC1,PC2,fill=region, shape=cat))+ geom_point(size=4,alpha=0.88, inherit.aes = T) +
+  #scale_colour_manual(values = cols2) +
+  scale_fill_viridis_d(end = 0.9, direction = 1) +
+  scale_shape_manual(values=c(21, 24, 23, 22), labels=c("extended", "native"), name="") +
+  theme_bw() + xlab(paste("PC1","(",var.rmxx[1],"%",")")) + ylab(paste("PC2","(",var.rmxx[2],"%",")")) +
+  guides(shape = guide_legend(order=2), fill=guide_legend(override.aes=list(shape=21), order = 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position="none") + labs(title = "N=237", subtitle = "maf=0.02, mind=122") 
+
+
+```
+
+&nbsp;
+
+### PCA plots
+```{r, warning=FALSE, message=FALSE}
+# Main plots
+cowplot::plot_grid(pca.243.p2, pca.243.p34)
+
+# Supplement plots
+cowplot::plot_grid(pca.rm.p2, pca.243.P.p, pca.243.S.p, pca.243.D.p,pca.243.D.p2)
+
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE}
+# Remove more relateds
+#potRel <- rmfailedYsp.rel %>% filter(rab > 0.5) %>% dplyr::select(ida, idb, rab)
+#potRel <- union(unique(potRel$ida), unique(potRel$idb)) 
+# make into vector of just sample IDs (some pot rel samples have already been removed for other failing purposes)
+#potRel2rm <- unlist(strsplit(potRel, split = ".merge"))[c(TRUE,FALSE)]
+
+meta.fullrmYsprmYrel <- meta.fullrmYsprm %>% filter(!sample %in% potRel2rm) #N=241
+meta.fullrmYsprmYrel <- as.data.frame(meta.fullrmYsprmYrel)
+```
+
+&nbsp;
+&nbsp;
+
+## IBD
+Isolation by distance based on pairwise Fst by county. Selected counties with N>=5.
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling
+#################
+#set a job name
+#SBATCH --job-name=countyFst
+#################
+#a file for job output, you can check job progress
+#SBATCH --output=countyFst.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=countyFst.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#resource
+#SBATCH -p RM-shared
+#################
+##SBATCH -N 1
+#SBATCH --ntasks 14
+#################
+##SBATCH --mem=100G
+#################
+#assigns allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#export MALLOC_PER_THREAD=1
+#echo commands to stdout
+
+set -x
+
+ANGSD=~/programs/angsd/angsd
+REALSFS=~/programs/angsd/misc/realSFS
+
+REFERENCE="/ocean/projects/deb200006p/adamsne2/ANHU/reference/GCF_003957555.1_bCalAnn1_v1.p/GCF_003957555.1_bCalAnn1_v1.p_genomic.fna"
+BAMDIR="/ocean/projects/deb200006p/adamsne2/ANHU/analyses/bams/ANHU.merge.mrkdup.autos.bams/countyBamlists"
+SITES="/ocean/projects/deb200006p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/all.uniqueSites.poly3.sort"
+OUTDIR="/ocean/projects/deb200006p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/Fst/countyFst"
+#BAMLIST=$1
+
+# Step 1 get .saf per county
+#$ANGSD -bam $BAMLIST -P 14 -ref $REFERENCE -anc $REFERENCE \
+#        -uniqueOnly 1 -remove_bads 1 -only_proper_pairs 1 \
+#        -trim 0 -skipTriallelic 1 -baq 1 -C 50 \
+#        -minMapQ 20 -minQ 20 -doCounts 1 -doMajorMinor 4 \
+#        -GL 1 -doSaf 1 -doMaf 1 -sites $SITES \
+#        -out "$OUTDIR"/${BAMLIST%%.*}
+
+
+# Step 2,3,4 calc 2D SFS priors, prepare files, calc global pairwise fst
+#cd $OUTDIR
+
+#LIST=$'ANHU_rmfailedYspYlowcovYrelAutos_SanDiego.saf.idx\n
+#ANHU_rmfailedYspYlowcovYrelAutos_SanLuisObispo.saf.idx\n
+#ANHU_rmfailedYspYlowcovYrelAutos_SantaBarbara.saf.idx\n
+#ANHU_rmfailedYspYlowcovYrelAutos_Sonoma.saf.idx\n
+#ANHU_rmfailedYspYlowcovYrelAutos_Yolo.saf.idx'
+LIST=$'ANHU_rmfailedYspYlowcovYrelAutos_Nevada.saf.idx'
+#ANHU_rmfailedYspYlowcovYrelAutos_Yolo.saf.idx'
+
+#for SAF1 in `ls *.saf.idx`;
+for SAF1 in $LIST;
+do
+NAM1=`ls $SAF1 | cut -f3 -d'_' | cut -f1 -d'.'`;
+for SAF2 in `ls *.saf.idx`;
+#for SAF2 in $LIST;
+do
+NAM2=`ls $SAF2 | cut -f3 -d'_' | cut -f1 -d'.'`;
+#$REALSFS $SAF1 $SAF2 -P 14 > "$NAM1"."$NAM2".ml;
+#$REALSFS fst index $SAF1 $SAF2 -sfs "$NAM1"."$NAM2".ml -fstout "$NAM1"."$NAM2".sites -whichFST 1 -P 14;
+#$REALSFS fst stats "$NAM1"."$NAM2".sites.fst.idx -P 14 > "$NAM1"."$NAM2".sites.globalFst;
+$REALSFS $SAF1 $SAF2 -P 14 -fold 1 > "$NAM1"."$NAM2".fold.sfs
+done
+done
+
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE}
+cfst <- as.data.frame(read_tsv("/Users/neasci/Documents/ANHU/popGenResults/countyFst.txt", col_names = F)) 
+
+cfst <- cfst %>% separate(X2, c("X2", "X3"), sep="\\s") %>% separate(X3, c("X3", "X4")) %>% rename(unweighted =X1, weighted = X2, C1=X3, C2=X4)
+cfst$unweighted <- as.numeric(cfst$unweighted)
+cfst$weighted <- as.numeric(cfst$weighted)
+
+
+# make matrix and keep only weighted Fst 
+cfst.mat <- cfst %>% select(-unweighted) %>% pivot_wider(names_from = C2, values_from=c(weighted))
+cfst.mat2 <- cfst.mat %>% select(-C1) %>% as.matrix() 
+colnames(cfst.mat2) <- NULL
+
+ckeep <- c("Maricopa", "Alameda", "Butte", "Contra Costa", "El Dorado", "Humboldt", "Los Angeles", "Madera", "Monterey", "Nevada", "San Diego", "San Luis Obispo", "Santa Barbara", "Sonoma", "Yolo", "Clark", "King")
+
+cdist <- meta.fullrmYsprmYrel %>% filter(County %in% ckeep) %>% distinct(County, .keep_all=T) %>% select(County, Latitude, Longitude) %>% arrange(County)
+
+# get all pairwise lat/long
+library(geodist)
+cdist.mat <- geodist(cdist, measure = "geodesic")
+
+# Mantel test?
+library(ape)
+c.mantel <- mantel.test(cfst.mat2, cdist.mat, nperm=9999)
+
+# plot
+cfst <- cfst %>% unite("C1.C2", C1, C2, sep = ".", remove = F)
+cfst$fst.n <- cfst$weighted/(1-cfst$weighted)
+
+library(reshape2)
+rownames(cdist.mat) <- cdist$County
+colnames(cdist.mat) <- cdist$County
+cdist.l <- setNames(melt(cdist.mat), c('C1','C2','dist'))
+cdist.l <- cdist.l %>% unite("C1.C2", C1, C2, sep = ".", remove = F)
+cdist.l$C1.C2 <- gsub('\\s+', '', cdist.l$C1.C2)
+
+cfull <- full_join(cfst, cdist.l, by= c("C1.C2"))
+
+cibd <- ggplot(cfull %>% filter(dist >0), aes(x=dist, y=weighted)) +
+  geom_point(size=4, alpha=0.8) +
+  geom_smooth(method = "lm", color="deeppink2") +
+  theme_bw() + ylab("Weighted Fst") + xlab("Geographic distance") 
+  #theme(axis.text.x = element_text(size=16), axis.text.y = element_text(size=16),
+  #      axis.title.x = element_text(size=20),axis.title.y = element_text(size=20) )
+
+cibd2 <- cibd + stat_regline_equation(label.x = c(1000000), label.y = c(-0.001),
+          aes(label = paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+          size=6)
+
+cibd2
+```
+
+&nbsp;
+
+### Relatedness IBD
+```{r, warning=FALSE, message=FALSE}
+pops5 <-meta.fullrmYsprmYrel %>% group_by(State,County) %>% tally() %>% filter(n >=5)
+counties.df <- meta.fullrmYsprmYrel %>% filter(County %in% pops5$County)
+#alameda <- meta.fullrmYsprmYrel %>% filter(County=="Alameda") %>% select(sample)
+
+CList <- list()
+for (COUNTY in unique(counties.df$County)){
+ CList[[COUNTY]] <- counties.df %>% filter(County==COUNTY) %>% select(sample)
+}
+
+# there's def a better way to do this....
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Alameda), collapse = "|"), rmfailedYsp.rel$ida), "Alameda", "foo")
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Butte), collapse = "|"), rmfailedYsp.rel$ida), "Butte", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$`Contra Costa`), collapse = "|"), rmfailedYsp.rel$ida), "ContraCosta", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Clark), collapse = "|"), rmfailedYsp.rel$ida), "Clark", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$`El Dorado`), collapse = "|"), rmfailedYsp.rel$ida), "ElDorado", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Humboldt), collapse = "|"), rmfailedYsp.rel$ida), "Humboldt", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$King), collapse = "|"), rmfailedYsp.rel$ida), "King", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$`Los Angeles`), collapse = "|"), rmfailedYsp.rel$ida), "LosAngeles", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Madera), collapse = "|"), rmfailedYsp.rel$ida), "Madera", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Maricopa), collapse = "|"), rmfailedYsp.rel$ida), "Maricopa", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Monterey), collapse = "|"), rmfailedYsp.rel$ida), "Monterey", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Nevada), collapse = "|"), rmfailedYsp.rel$ida), "Nevada", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$`San Diego`), collapse = "|"), rmfailedYsp.rel$ida), "SanDiego", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$`San Luis Obispo`), collapse = "|"), rmfailedYsp.rel$ida), "SanLuisObispo", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$`Santa Barbara`), collapse = "|"), rmfailedYsp.rel$ida), "SantaBarbara", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Sonoma), collapse = "|"), rmfailedYsp.rel$ida), "Sonoma", rmfailedYsp.rel$aC)
+rmfailedYsp.rel$aC <- ifelse(grepl(paste(unlist(CList$Yolo), collapse = "|"), rmfailedYsp.rel$ida), "Yolo", rmfailedYsp.rel$aC)
+
+
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Alameda), collapse = "|"), rmfailedYsp.rel$idb), "Alameda", "foo")
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Butte), collapse = "|"), rmfailedYsp.rel$idb), "Butte", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$`Contra Costa`), collapse = "|"), rmfailedYsp.rel$idb), "ContraCosta", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Clark), collapse = "|"), rmfailedYsp.rel$idb), "Clark", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$`El Dorado`), collapse = "|"), rmfailedYsp.rel$idb), "ElDorado", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Humboldt), collapse = "|"), rmfailedYsp.rel$idb), "Humboldt", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$King), collapse = "|"), rmfailedYsp.rel$idb), "King", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$`Los Angeles`), collapse = "|"), rmfailedYsp.rel$idb), "LosAngeles", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Madera), collapse = "|"), rmfailedYsp.rel$idb), "Madera", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Maricopa), collapse = "|"), rmfailedYsp.rel$idb), "Maricopa", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Monterey), collapse = "|"), rmfailedYsp.rel$idb), "Monterey", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Nevada), collapse = "|"), rmfailedYsp.rel$idb), "Nevada", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$`San Diego`), collapse = "|"), rmfailedYsp.rel$idb), "SanDiego", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$`San Luis Obispo`), collapse = "|"), rmfailedYsp.rel$idb), "SanLuisObispo", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$`Santa Barbara`), collapse = "|"), rmfailedYsp.rel$idb), "SantaBarbara", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Sonoma), collapse = "|"), rmfailedYsp.rel$idb), "Sonoma", rmfailedYsp.rel$bC)
+rmfailedYsp.rel$bC <- ifelse(grepl(paste(unlist(CList$Yolo), collapse = "|"), rmfailedYsp.rel$idb), "Yolo", rmfailedYsp.rel$bC)
+
+
+rmfailedYsp.rel.co <- rmfailedYsp.rel %>% select(ida, idb, rab, aC, bC) %>% filter(aC != "foo"& bC !="foo") %>% unite("C1.C2", aC, bC, sep = ".", remove = F)
+
+rel.c <- full_join(rmfailedYsp.rel.co, cdist.l, by= c("C1.C2"))
+
+rel.c.p <- ggplot(rel.c, aes(x=dist, y=rab)) +
+  geom_point(size=4, alpha=0.8) +
+  geom_smooth(method = "lm") +
+  stat_regline_equation(label.x = c(800000), label.y = c(-0.001),
+          aes(label = paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+          size=6) +
+  theme_bw() + ylab("Relatedness (rab)") + xlab("Geographic distance") 
+  #theme(axis.text.x = element_text(size=16), axis.text.y = element_text(size=16),
+  #      axis.title.x = element_text(size=20),axis.title.y = element_text(size=20) )
+
+rmfailedYsp.rel.co2 <- rmfailedYsp.rel.co %>% filter(aC==bC)
+rmfailedYsp.rel.co2$C1.C2 <- factor(rmfailedYsp.rel.co2$C1.C2, levels = c("King.King", "Humboldt.Humboldt", "Butte.Butte","Nevada.Nevada", "ElDorado.ElDorado","Yolo.Yolo", "Sonoma.Sonoma", "ContraCosta.ContraCosta", "Alameda.Alameda",  "Madera.Madera", "Monterey.Monterey", "SanLuisObispo.SanLuisObispo", "SantaBarbara.SantaBarbara", "LosAngeles.LosAngeles", "SanDiego.SanDiego", "Clark.Clark", "Maricopa.Maricopa"))
+
+rel.mean.p <- ggpubr::ggerrorplot(rmfailedYsp.rel.co2 %>% group_by(C1.C2), x = "C1.C2", y = "rab",
+            desc_stat = "mean_se",              # mean_se shows bigger diff
+            error.plot = "errorbar",            # Change error plot type (crossbar)
+            add = "mean",                        # Add mean points to errorbar
+           # add.params = list(fill="region"),
+           color="C1.C2",
+            ggtheme = theme_bw()) + 
+      scale_color_viridis_d(end = 0.93, direction = 1) +
+  ylab("Relatedness") +
+  theme(legend.position = "none", 
+        #axis.text.x = element_text(size = 10, angle = 90),
+        axis.text.y = element_text(size = 12),
+      axis.text.x = element_blank(),
+      axis.title.x = element_blank(),  axis.title.y = element_text(size = 12))
+
+gp = ggplotGrob(rel.mean.p)
+rel_g1 <- grobTree(
+                  linesGrob(unit(c(.07, .99), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'lightgrey', lwd = 4)),
+                  linesGrob(unit(c(.07, .17), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                   linesGrob(unit(c(.90, .99), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                  textGrob("Northern",x=.07,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Native",x=.5,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Eastern",x=.91,hjust=0,
+                           gp=gpar(col="black",fontsize=12)))
+
+#Plot All Together
+all.rel.plot <- grid.arrange(rel.mean.p,rel_g1,heights=c(11,0.9))
+grid.draw(all.rel.plot)
+```
+
+&nbsp;
+&nbsp;
+
+### Heterozygostiy
+Individual heterozygosity for counties with N>=5. I did N=10 for each county or all avail for those with N<10.
+I followed the [ANGSD global heterozygosity](http://www.popgen.dk/angsd/index.php/Heterozygosity) instructions.
+First I got the .saf.idx files using:
+```{bash, eval=FALSE, message=FALSE}
+cat countyBams4het.sub.bamlist | while read BAM;
+do
+NAM1=`ls $BAM | cut -f3,4 -d'.'`;
+ Step 1) get saf for EACH SAMPLE
+$ANGSD -i $BAM -anc $REFERENCE -ref $REFERENCE -P 10 \
+       -uniqueOnly 1 -remove_bads 1 -only_proper_pairs 1 \
+       -trim 0 -skipTriallelic 1 -baq 1 -C 50 \
+       -minMapQ 20 -minQ 20 -doMajorMinor 4 \
+       -dosaf 1 -GL 1 -out "$OUTDIR"/"$NAM1";
+done
+
+```
+
+&nbsp;
+
+The next step I got the .ml files:
+```{bash, eval=FALSE, message=FALSE}
+for SAF in *.saf.idx;
+do
+NAM2=`ls $SAF | cut -f1,2 -d'.'`;
+$REALSFS "$NAM2".saf.idx -fold 1 -P 24 > "$NAM2".ml;
+done
+
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE}
+# AN124 <- c(846736991.495051, 590940.676528, 0.000000)
+# AN124.h <- AN124[2]/sum(AN124)
+
+ml.files<-list.files(path="~/Documents/ANHU/popGenResults/indivHet", pattern='.ml', full.names = TRUE)
+het.List <- list()
+for (FILE in ml.files){
+  ml <- scan(FILE)
+  IND <- unlist(strsplit(FILE, "[/|,.,_]+"))[c(8:10)] %>% paste(collapse=".")
+  dfName <- paste(IND, 'het', sep = '.' )
+  het.List[[IND]] <- ml[2]/sum(ml)
+  }
+
+het.df <- data.frame(c(sapply(het.List, c)))
+het.df <- het.df %>% rename(het=c.sapply.het.List..c..)
+het.df$IND <- rownames(het.df)
+
+het.df.1 <- het.df %>% filter(grepl("merge", IND))
+het.df.2 <- het.df %>% filter(grepl("seqPool", IND))
+
+het.df.1b <- het.df.1 %>% separate(IND, c("sample", "stuff")) %>% select(-stuff)
+het.df.2b <- het.df.2 %>% separate(IND, c("stuff", "sample"), sep = "\\.", extra="merge") %>% select(-stuff)
+het.df.2b$sample <- gsub('\\.', '_', het.df.2b$sample)
+
+het.df2 <- rbind(het.df.1b, het.df.2b) 
+
+het.df.m <- left_join(het.df2, meta.fullrmYsprmYrel)
+het.df.m$County <- factor(het.df.m$County, levels = c("King", "Humboldt", "Butte", "Nevada", "El Dorado", "Yolo", "Sonoma", "Contra Costa", "Alameda", "Madera", "Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego", "Clark","Maricopa"))
+
+clark2rm <- c("AN109643", "AN97238", "AN97243", "UW114469") # rm bc wanted N=10, accidentily did N=14
+het.df.m <- het.df.m %>% filter(!sample %in% clark2rm)
+
+# Create 6 regions category
+BAY.county <- c("Butte", "Nevada","El Dorado",  "Yolo", "Sonoma", "Contra Costa", "Alameda")
+VAL.county <-  c("Madera")
+PAC.county <- c("Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego")
+het.df.m$region <- ifelse(het.df.m$State == "WA", "WAS", "foo")
+het.df.m$region <- ifelse(het.df.m$State == "AZ"| het.df.m$State== "NV", "EAS", het.df.m$region)
+het.df.m$region <- ifelse(het.df.m$County == "Humboldt", "HUM", het.df.m$region)
+het.df.m$region <- ifelse(het.df.m$County %in% BAY.county, "BAY", het.df.m$region)
+het.df.m$region <- ifelse(het.df.m$County %in% VAL.county, "VAL", het.df.m$region)
+het.df.m$region <- ifelse(het.df.m$County %in% PAC.county, "PAC", het.df.m$region)
+het.df.m$region <- factor(het.df.m$region, levels=c("WAS", "HUM", "BAY", "VAL", "PAC", "EAS"))
+  
+het.p <- ggerrorplot(het.df.m, x = "County", y = "het",
+            desc_stat = "mean_se",              # mean_se shows bigger diff
+            error.plot = "errorbar",            # Change error plot type (errorbar)
+            add = "mean",                        # Add mean points to errorbar
+           # add.params = list(fill="region"),
+           color = "County",
+            ggtheme = theme_bw()) + 
+      scale_color_viridis_d(end = 0.93, direction = 1) +
+  ylab("Heterozygosity") +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 12, angle = 90), axis.text.y = element_text(size = 12),
+      axis.title.x = element_blank(),  axis.title.y = element_text(size = 12))
+   # stat_compare_means(label.y=0.003)
+
+gp = ggplotGrob(het.p)
+het_g1 <- grobTree(
+                  linesGrob(unit(c(.07, .99), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'lightgrey', lwd = 4)),
+                  linesGrob(unit(c(.07, .17), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                   linesGrob(unit(c(.90, .99), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                  textGrob("Northern",x=.07,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Native",x=.5,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Eastern",x=.91,hjust=0,
+                           gp=gpar(col="black",fontsize=12)))
+
+#Plot All Together
+all.het.plot <- grid.arrange(het.p,het_g1,heights=c(11,0.9))
+grid.draw(all.het.plot)
+
+cowplot::plot_grid(rel.mean.p, all.het.plot, labels = "AUTO", ncol=1)
+
+```
+
+&nbsp;
+
+```{r,  warning=FALSE, message=FALSE}
+het.tab <- het.df.m %>% group_by(County) %>% count()
+
+kable(het.tab, caption = "Sample size per county for heterozygosity") %>% kable_styling(bootstrap_options = c("condensed"))
+#kable(list(het.tab[1:9], het.tab[10-17])) %>% kable_styling(bootstrap_options = c("condensed"))
+```
+
+&nbsp;
+
+Test if older samples have lower het
+```{r, warning=FALSE, message=FALSE}
+my.formula <- y ~ x
+het.time <- ggplot(data=het.df.m, aes(x=CaptureDate, y=het)) +
+  geom_point() +
+  geom_smooth(method = "lm", color="orange") +
+  stat_poly_eq(formula = my.formula, 
+                aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+                parse = TRUE) +
+  facet_wrap(~region, ncol = 3)
+```
+
+
+&nbsp;
+&nbsp;
+
+## Fst - county
+```{r, warning=FALSE, message=FALSE}
+# Pairwise county Fst
+
+meta.full$County <- factor(meta.full$County, levels=c("Skagit", "Snohomish", "Kitsap", "King", "Kittitas", "Mason", "Pacific", "Humboldt", "Butte", "Nevada","El Dorado",  "Yolo", "Sonoma", "Sacramento", "Marin", "Contra Costa", "San Francisco", "Alameda", "Santa Clara", "Madera", "Tulare", "Clark", "Monterey", "San Luis Obispo", "Santa Barbara", "Los Angeles", "San Diego", "Maricopa", "Yuma", "Cochise"))
+
+cfst$C1 <- factor(cfst$C1, levels = c("King", "Humboldt", "Butte", "Nevada", "ElDorado", "Yolo", "Sonoma", "ContraCosta", "Alameda", "Madera", "Monterey", "SanLuisObispo", "SantaBarbara", "LosAngeles", "SanDiego", "Clark","Maricopa"))
+cfst$C2 <- factor(cfst$C2, levels = c("King", "Humboldt", "Butte", "Nevada", "ElDorado", "Yolo", "Sonoma", "ContraCosta", "Alameda", "Madera", "Monterey", "SanLuisObispo", "SantaBarbara", "LosAngeles", "SanDiego","Clark", "Maricopa"))
+
+regionCols <- viridis(6, end=0.93)
+countyCols <- c(regionCols[1],regionCols[2],regionCols[3], regionCols[3], regionCols[3], regionCols[3], regionCols[3], regionCols[3], regionCols[3], regionCols[4],regionCols[5], regionCols[5],regionCols[5],regionCols[5],regionCols[5], regionCols[6], regionCols[6] )
+
+cfst2 <- cfst %>% filter(C1!=C2) 
+cfst$C2.C1 <- paste(cfst$C2, cfst$C1, sep = ".")
+  
+# county fst heatmap
+cfst.heat <- ggplot(cfst %>% filter(C1 !=C2), aes(C1, C2, fill=weighted)) + 
+  geom_tile() + geom_text(aes(label=round(weighted, digits = 4))) +
+  #scale_fill_viridis_c(option = "A", name="Weighted Fst") +
+  theme_bw() + labs(fill="Weighted Fst") +
+   theme(axis.text.x = element_text(angle = 90, colour = countyCols), 
+         axis.text.y = element_text(colour = countyCols),
+         axis.title.y = element_blank(), 
+         axis.title.x = element_blank()) 
+
+# cfst.heat
+
+## get only triangle heatmap
+cfst.mat.x <- cfst.mat %>% select(-C1) %>% as.matrix()
+rownames(cfst.mat.x) <- cfst.mat$C1
+col.order <- c("King", "Humboldt", "Butte", "Nevada", "ElDorado", "Yolo", "Sonoma", "ContraCosta", "Alameda", "Madera", "Monterey", "SanLuisObispo", "SantaBarbara", "LosAngeles", "SanDiego", "Clark","Maricopa")
+row.order <- c("King", "Humboldt", "Butte", "Nevada", "ElDorado", "Yolo", "Sonoma", "ContraCosta", "Alameda", "Madera", "Monterey", "SanLuisObispo", "SantaBarbara", "LosAngeles", "SanDiego", "Clark","Maricopa")
+cfst.mat.x <- cfst.mat.x[row.order,col.order]
+
+cfst.mat.x[lower.tri(cfst.mat.x, diag = T)] <- NA
+
+cfst.melt <- na.omit(melt(cfst.mat.x))
+
+cfst.melt$Var1 <- factor(cfst.melt$Var1, levels = c("King", "Humboldt", "Butte", "Nevada", "ElDorado", "Yolo", "Sonoma", "ContraCosta", "Alameda", "Madera", "Monterey", "SanLuisObispo", "SantaBarbara", "LosAngeles", "SanDiego", "Clark","Maricopa"))
+cfst.melt$Var2 <- factor(cfst.melt$Var2, levels = c("King", "Humboldt", "Butte", "Nevada", "ElDorado", "Yolo", "Sonoma", "ContraCosta", "Alameda", "Madera", "Monterey", "SanLuisObispo", "SantaBarbara", "LosAngeles", "SanDiego","Clark", "Maricopa"))
+
+heats.p <- ggplot(data = cfst.melt, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() + geom_text(aes(label=round(value, digits = 4))) +
+  theme_bw() + labs(fill="Weighted Fst") +
+  scale_fill_viridis_c(option = "A", begin = 0.1) +
+   theme(axis.text.x = element_text(angle = 90),
+         axis.title.y = element_blank(), 
+         axis.title.x = element_blank()) 
+
+gp = ggplotGrob(heats.p)
+
+my_grob <- grobTree(
+                  linesGrob(unit(c(.1, .88), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'lightgrey', lwd = 4)),
+                  linesGrob(unit(c(.1, .19), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                   linesGrob(unit(c(.85, .89), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                  textGrob("Northern",x=.12,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Native",x=.5,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Eastern",x=.85,hjust=0,
+                           gp=gpar(col="black",fontsize=12)))
+
+#Plot All Together
+allplot <- grid.arrange(heats.p,my_grob,heights=c(11,0.9))
+grid.draw(allplot)
+
+
+```
+
+
+&nbsp;
+&nbsp;
+
+## Slatkin's psi - region
+positive psi = pop1 is further away from the origin of the expansion than pop2;
+psi 0 = pops are similar distance from origin;
+negative psi = expansion from pop1 to pop2;
+bc pop further away from origin is supposed to experience more drift (higher allele freq)
+
+&nbsp;
+
+sbatch script
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=fst
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=fst_B-P.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=fst_B-P.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 24:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#number of nodes
+##SBATCH --nodes=1
+#SBATCH --ntasks-per-node 4
+#################
+#SBATCH --mem=288G
+#################
+#assigns Xsede allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#echo commands to stdout
+
+set -x
+
+ANGSD=~/programs/angsd/angsd
+REALSFS=~/programs/angsd/misc/realSFS
+#IDX1="ANHU_rmfailedYspYlowcovYrelAutos_BAY.polySites.saf.idx"
+#IDX2="ANHU_rmfailedYspYlowcovYrelAutos_PAC.polySites.saf.idx"
+POP1=$(echo $IDX1|sed 's/.saf.idx//g')
+POP2=$(echo $IDX2|sed 's/.saf.idx//g')
+NAM1="BAY"
+NAM2="PAC"
+SITES="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/unfoldedSFS/ANHU_rmfailedYspYlowcovYrelAutos.mind229.mafs.polySites2"
+OUTDIR="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/nucDiv"
+IDX1="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/nucDiv/ANHU_rmfailedYspYlowcovYrelAutos_BAY.13.mind3.n13.saf.idx"
+IDX2="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/nucDiv/ANHU_rmfailedYspYlowcovYrelAutos_PAC.13.mind3.n13.saf.idx"
+
+
+REFERENCE="/pylon5/ebz3a6p/adamsne2/ANHU/reference/GCF_003957555.1_bCalAnn1_v1.p/GCF_003957555.1_bCalAnn1_v1.p_genomic.fna"
+
+# step 1 calc saf per pop
+
+# Calc 2dsfs prior
+#$REALSFS "$IDX1" "$IDX2" -sites $SITES -P 10 -fstout "$NAM1"."$NAM2".polySites.ml >"$NAM1"."$NAM2".polySites.ml
+
+#$REALSFS fst index "$IDX1" "$IDX2" -sfs "$NAM1"."$NAM2".polySites.ml -fstout "$OUTDIR"/"$NAM1"."$NAM2".polySites -whichFST 1 -P 10
+
+# get 2d sfs
+$REALSFS "$IDX1" "$IDX2" -fold 1 -P 10 > "$OUTDIR"/"$NAM1"."$NAM2".n13.polySites.fold.sfs
+
+# Get global estimate
+#$REALSFS fst stats "$OUTDIR"/"$NAM1"."$NAM2".polySites.fst.idx -P 10 >"$OUTDIR"/"$NAM1"."$NAM2".polySites.globalFst
+
+# Get window estimates
+#$REALSFS fst stats2 "$OUTDIR"/"$NAM1"."$NAM2".polySites.fst.idx -win 50000 -step 10000 -whichFST 1 -P 10 > "$OUTDIR"/"$NAM1"."$NAM2".polySites.win50k
+
+# Get per site fst
+#$REALSFS fst print "$OUTDIR"/"$NAM1"."$NAM2".polySites.fst.idx -P 10 > "$OUTDIR"/"$NAM1"."$NAM2".polySites.loci.fst
+
+# Loop per site
+#for FILE in *.sites.fst.idx; do echo $FILE; out=$(echo $FILE|sed 's/.fst.idx//g'); $REALSFS fst print $FILE -P 10 > $out\.loci.fst; done
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE}
+# loop over all pairwise 2d sfs files to calc slatkin
+sfs2D.files<-list.files(path="~/Documents/ANHU/popGenResults", pattern='.polySites.fold.sfs', full.names = TRUE)
+
+psi.List <- list()
+for (FILE in sfs2D.files){
+  sfs2D <- scan(FILE)
+  POPS <- unlist(strsplit(FILE, "[/|,.,_]+"))[c(7:8)] %>% paste(collapse=".") 
+  #dfName <- paste(POPS, 'psi', sep = '.' )
+ 
+  mat <- matrix(unlist(sfs2D), ncol = 27) # convert to matrix
+  mat2 <- mat[-c(1), -c(1)] # remove f(0) in both pops 
+  sum <- sum(mat2)
+  mat.Fij <- apply(mat2, 1:2, function(x) (x/sum))
+  mat.i <- col(mat2) 
+  mat.j <- row(mat2) 
+  mat.ij <- (mat.i)-(mat.j)
+  mat3 <- mat.ij*mat.Fij # this works
+  psi <- sum(mat3)
+
+  psi.List[[ POPS ]] <- psi
+}
+
+psi.df <- rbind(psi.List)
+psi.df2 <- as.data.frame(t(psi.df))
+psi.df2$psi.List <- as.numeric(psi.df2$psi.List)
+
+# create a z score (assumption that psi is normal)
+psi.df2$pops <- rownames(psi.df2)
+psi.df3 <- psi.df2 %>% separate(pops, c("POP1", "POP2"))
+psi.df3$zScore <- (psi.df3$psi.List - mean(psi.df3$psi.List))/sd(psi.df3$psi.List)
+
+
+```
+
+&nbsp;
+
+### Plot Slatkin's psi - region
+```{r, warning=FALSE, message=FALSE}
+# Plot base map
+# get just 6 pop points
+county.keep <- c("King", "Humboldt", "Yolo", "Madera", "Santa Barbara", "Maricopa")
+pop.df <- meta.fullrmYsprmYrel %>% group_by(County) %>%
+  filter(row_number()==ceiling(n()/2)) %>% filter(County %in% county.keep)
+pop.df$County <- factor(pop.df$County, levels = c("King", "Humboldt", "Yolo", "Madera", "Santa Barbara", "Maricopa"))
+
+psi.map <- g0b + 
+  geom_point(data = pop.df, mapping = aes(x = Longitude, y = Latitude, shape = Species_code, color=County),size=5, stroke=2,show.legend = F, inherit.aes = FALSE) +
+  scale_shape_manual(values=c(21), name="") +
+  scale_color_viridis_d(end = 0.9, direction = 1)
+
+#ggsave(filename="~/Documents/ANHU/ANHU_maps/ANHU_SlatkinBase.png",psi.map)
+```
+
+![Slakin's Psi map](/Users/neasci/Documents/ANHU/popGenResults/slatkinMap_5-14-2021.png){#id .class width=50% height=50%}
+
+&nbsp;
+&nbsp;
+
+## Nucleotide diversity
+Down-sampled to 13 individuals per pop to calc nucDiv/thetas
+
+&nbsp;
+
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=nucDiv
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=nucDiv.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=nucDiv.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 48:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p LM
+#################
+#default is one core, should be fine for samtools -nope
+#################
+#number of nodes- for RM-shared -N 1
+#SBATCH -N 1
+#SBATCH --ntasks-per-node 6
+#################
+#SBATCH --mem=228G
+#################
+#assigns Xsede allocation 
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#export MALLOC_PER_THREAD=1
+#echo commands to stdout
+
+set -x
+
+j=ANHU_rmfailedYspYlowcovYrelAutos_BAY.13.bamlist
+NUM=3
+POP=BAY
+outfile=$(echo $j|sed 's/.bamlist//g')
+OUTDIR="/pylon5/ebz3a6p/adamsne2/ANHU/analyses/ANHU_rmfailedYspYlowcovYrelAutos.analyses/nucDiv"
+
+NGSTOOLS="/home/adamsne2/programs/ngsTools"
+REFERENCE="/pylon5/ebz3a6p/adamsne2/ANHU/reference/GCF_003957555.1_bCalAnn1_v1.p/GCF_003957555.1_bCalAnn1_v1.p_genomic.fna"
+
+# Step 2: get SFS
+#~/programs/angsd/misc/realSFS "$OUTDIR"/"$outfile".mind"$NUM".n13.saf.idx -fold 1 -P 8 > "$OUTDIR"/"$outfile".mind"$NUM".n13.fold.sfs 
+
+# Step 3: print SFS
+#Rscript $NGSTOOLS/Scripts/plotSFS.R "$OUTDIR"/"$outfile".mind"$NUM".n13.sfs "$POP" 1 "$OUTDIR"/"$outfile".mind"$NUM".n13.fold.sfs.pdf
+
+
+# Step 4:compute allele freq posterior probabilities and associated statistics (-doTheta) using SFS as prior (-pest)
+#~/programs/angsd/angsd -bam "$j" -P 10 -ref $REFERENCE -anc $REFERENCE \
+#        -uniqueOnly 1 -remove_bads 1 -only_proper_pairs 1 \
+#        -trim 0 -baq 1 -C 50 \
+#        -minMapQ 20 -minQ 20 -minInd "$NUM" -setMinDepth 3 \
+#        -GL 1 -doCounts 1 \
+#        -doSaf 1 -doThetas 1 -pest "$OUTDIR"/"$outfile".mind"$NUM".n13.fold.sfs -out "$OUTDIR"/"$outfile".mind"$NUM".n13.fold
+
+# index those files
+#~/programs/angsd/misc/thetaStat do_stat "$OUTDIR"/"$outfile".mind"$NUM".n13.fold.thetas.idx 
+
+# sliding window analysis
+~/programs/angsd/misc/thetaStat do_stat "$OUTDIR"/"$outfile".mind"$NUM".n13.fold.thetas.idx -win 5000 -step 1000 -outnames "$OUTDIR"/"$outfile".mind"$NUM".n13.fold.thetas.5K
+
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE}
+theta.files<-list.files(path="~/Documents/ANHU/popGenResults", pattern='thetas.pestPG', full.names = TRUE)
+
+theta.List <- list()
+
+for (FILE in theta.files){
+  theta <- as.data.frame(read.table(FILE))
+  POP <- unlist(strsplit(FILE, "[/|,.,_]+"))[c(9)] %>% paste(collapse=".") 
+  dfName <- paste(POP, 'theta', sep = '.' )
+  pltName <- paste('plot', POP, sep = '.' )
+  pltName2 <- paste('tajD', POP, sep = '.' )
+  colnames(theta) <- c("pos", "Chr", "WinCenter", "tW", "tP", "tF", "tH", "tL", "Tajima", "fuf", "fud", "fayh", "zeng", "nSites")
+  theta <- theta %>% separate(pos, c("xxx", "indexStart", "indexStop", "firstPos_withData", "lastPos_withData", "WinStart", "WinStop"))
+  theta <- theta %>% subset(select=-c(xxx))
+  level_key <- c(NC_044244.1 = "1", NC_044245.1= "2", NC_044246.1= "3", NC_044247.1= "4", NC_044248.1= "4A", NC_044250.1= "5", NC_044249.1= "4B", NC_044252.1= "6", NC_044253.1= "7", NC_044251.1= "5A", NC_044254.1= "8", NC_044255.1= "9", NC_044256.1= "10", NC_044257.1= "11", NC_044258.1= "12", NC_044259.1= "13", NC_044260.1= "14", NC_044261.1= "15", NC_044262.1= "17", NC_044263.1= "18", NC_044264.1= "19", NC_044265.1= "20", NC_044266.1= "21", NC_044267.1= "22", NC_044268.1= "23", NC_044269.1= "24", NC_044270.1= "25", NC_044271.1= "26", NC_044272.1= "27", NC_044273.1= "28", NC_044275.1= "33")
+
+  theta$Chr <- recode(theta$Chr, !!!level_key)
+  
+  filter.thetas <- subset(x = theta, tW != 0)
+  
+  theta.List[[ dfName ]] <- filter.thetas
+
+don <- filter.thetas %>% 
+  # Compute chromosome size
+  group_by(Chr) %>% 
+  dplyr::summarise(chr_len=max(WinCenter)) %>% 
+  # Calculate cumulative position of each chromosome
+  mutate(tot=cumsum(chr_len)-chr_len) %>%
+  dplyr::select(-chr_len) %>%
+  # Add this info to the initial dataset
+  left_join(theta, ., by=c("Chr"="Chr")) %>%
+  # Add a cumulative position of each SNP
+  arrange(Chr, WinCenter) %>%
+  mutate( POS=WinCenter+tot)
+axisdf = don %>% group_by(Chr) %>% summarize(center=( max(POS) + min(POS) ) / 2 )
+
+# Plot nuc diversity (theta)
+theta.List[[ pltName ]] <- ggplot(don, aes(x=POS, y=tP/nSites)) +
+    # Show all points
+    geom_point( aes(color=as.factor(Chr)), alpha=0.8, size=1.3) +
+    scale_color_manual(values = rep(c("grey", "purple4"), 22 )) +
+    # custom X axis:
+    scale_x_continuous( label = axisdf$Chr, breaks= axisdf$center, guide =guide_axis(n.dodge=2) ) +
+    scale_y_continuous(expand = c(0, 0) ) +     # remove space between plot area and x axis
+  ylim(0,0.08) + # so all pops are on the same y scale
+  #geom_hline(yintercept=5*sd(don$tP/don$nSites, na.rm = TRUE), linetype="dashed", color = "red") + # 2x standard dev line
+    # Custom the theme:
+    theme_bw() + labs(title =POP) +
+    theme( 
+      legend.position="none",
+      panel.border = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.text.x = element_text(angle = 45),
+      axis.text.y = element_text(size = 20),
+      axis.title.y = element_text(size = 20)
+    )
+
+# plot Tajima's D
+theta.List[[ pltName2 ]] <- ggplot(don, aes(x=POS, y=Tajima)) +
+    # Show all points
+    geom_point( aes(color=as.factor(Chr)), alpha=0.7, size=1.3) +
+    scale_color_manual(values = rep(c("grey", "orange"), 22 )) +
+    # custom X axis:
+    scale_x_continuous( label = axisdf$Chr, breaks= axisdf$center, guide =guide_axis(n.dodge=2) ) +
+    scale_y_continuous(expand = c(0, 0) ) +     # remove space between plot area and x axis
+  #ylim(0,0.08) + # so all pops are on the same y scale
+  #geom_hline(yintercept=5*sd(don$tP/don$nSites, na.rm = TRUE), linetype="dashed", color = "red") + # 2x standard dev line
+    # Custom the theme:
+    theme_bw() + labs(title =POP) +
+    theme( 
+      legend.position="none",
+      panel.border = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.text.x = element_text(angle = 45),
+      axis.text.y = element_text(size = 20),
+      axis.title.y = element_text(size = 20) )
+}
+
+# add region column
+theta.List$WAS.theta$region <- "WAS"
+theta.List$HUM.theta$region <- "HUM"
+theta.List$BAY.theta$region <- "BAY"
+theta.List$VAL.theta$region <- "VAL"
+theta.List$PAC.theta$region <- "PAC"
+theta.List$EAS.theta$region <- "EAS"
+
+all.theta.df <- as.data.frame(rbind(theta.List$WAS.theta, theta.List$HUM.theta, theta.List$BAY.theta, theta.List$VAL.theta, theta.List$PAC.theta, theta.List$EAS.theta))
+
+all.theta.df$region <- factor(all.theta.df$region, levels=c("WAS", "HUM", "BAY", "VAL", "PAC", "EAS"))
+all.theta.df$cat <- ifelse(all.theta.df$region=="BAY" |all.theta.df$region=="VAL"|all.theta.df$region=="PAC", "og", "ex")
+all.theta.df$cat <- as.factor(all.theta.df$cat)
+all.theta.df$tp_nSites <- all.theta.df$tP/all.theta.df$nSites
+
+all.theta.summary <- aggregate(tp_nSites ~ region, mean, data=all.theta.df)
+
+theta.mean.p <- ggerrorplot(all.theta.df, x = "region", y = "tp_nSites", color = "region",
+            desc_stat = "mean_se",              # mean_se shows bigger diff
+            error.plot = "crossbar",            # Change error plot type (errorbar)
+           # add = "mean",                        # Add mean points to errorbar
+           # add.params = list(fill="region"),
+            ggtheme = theme_bw()) + 
+      scale_color_viridis_d(end = 0.9, direction = 1) +
+  ylab("pairwise Theta") +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16),
+      axis.title.x = element_blank(),  axis.title.y = element_text(size = 20))
+   # stat_compare_means(label.y=0.003)
+
+theta.lm <- glm(tp_nSites ~ region, data = all.theta.df)
+
+#theta.mean.p
+
+# annotations  (code from https://stackoverflow.com/questions/39215564/drawing-ggplot-footer-using-linesgrob-within-grobtree)
+gp = ggplotGrob(theta.mean.p)
+
+my_g1 <- grobTree(#rectGrob(gp=gpar(fill="#F0F0F0",col=NA)),
+                  linesGrob(unit(c(.25, .90), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'lightgrey', lwd = 4)),
+                  linesGrob(unit(c(.22, .45), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                   linesGrob(unit(c(.86, .97), "npc"), unit(1, "npc"),
+                            gp = gpar(col = 'grey28', lwd = 4)),
+                  textGrob("Northern",x=.28,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Native",x=.6,hjust=0,
+                           gp=gpar(col="black",fontsize=12)),
+                  textGrob("Eastern",x=.88,hjust=0,
+                           gp=gpar(col="black",fontsize=12)))
+
+#Plot All Together
+allplot <- grid.arrange(theta.mean.p,my_g1,heights=c(11,0.9))
+grid.draw(allplot)
+
+```
+
+&nbsp;
+&nbsp;
+
+## pFst
+
+```{bash, eval=FALSE, message=FALSE}
+#!/bin/bash 
+#
+#all commands that start with SBATCH contain commands that are just used by SLURM for scheduling  
+#################
+#set a job name  
+#SBATCH --job-name=pFst.PE
+#################  
+#a file for job output, you can check job progress
+#SBATCH --output=pFst.PE.%j.out
+#################
+# a file for errors from the job
+#SBATCH --error=pFst.PE.%j.err
+#################
+#time you think you need; default is one hour
+#in minutes in this case
+#SBATCH -t 24:00:00
+#################
+#quality of service; think of it as job priority
+#SBATCH -p RM
+#################
+#number of nodes
+##SBATCH --nodes=1
+##SBATCH --ntasks-per-node 4
+#################
+##SBATCH --mem=288G
+#################
+#assigns Xsede allocation
+#SBATCH -A xxx
+#################
+#get emailed about job BEGIN, END, and FAIL
+#SBATCH --mail-type=END
+#################
+#who to send email to; please change to your email
+#SBATCH  --mail-user=xxx@ucdavis.edu
+#################
+#now run normal batch commands
+##################
+#echo commands to stdout
+
+set -x
+
+
+# Location: /home/adamsne2/.conda/envs/vcflib_env 
+
+
+interact 
+module load anaconda3/2019.03 
+source activate vcflib_env
+
+#pFst --target 27,28,29,130,131,132,133,134,135,136,137,138,139,140,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,232,233,234,235,236,237,239,240 --background 0,1,2,7,8,9,10,11,16,17,18,19,20,30,31,32,33,34,35,43,44,45,46,47,48,84,85,86,87,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,123,141,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,206,207,208,211,212,213,218,219,221 --file ANHU_rmfailedYspYlowcovYrelAutos_path.vcf.gz --type PL > ANHU_rmfailedYspYlowcovYrelAutos_path.pFst
+
+
+pFst --target 21,22,23,24,162,163,164,165,166,167,168,169,170,171,172,224,225,226,227,229,230,231,238 --background 3,4,5,6,25,26,36,37,38,39,40,41,42,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,120,121,122,124,125,126,127,128,129,197,198,199,200,201,202,203,204,205,209,210,214,215,216,217,220,222,223,228 --file ANHU_rmfailedYspYlowcovYrelAutos_path.vcf.gz --type PL > PAC.EAS.pFst
+```
+
+&nbsp;
+
+```{r, warning=FALSE, message=FALSE}
+pFst.files<-list.files(path="~/Documents/ANHU/popGenResults", pattern='.pFst', full.names = TRUE)
+
+pFst.files <- pFst.files[!grepl("Ma|Fe", pFst.files)]  #all pFst
+#pFst.files2 <- pFst.files[grepl("Ma|Fe", pFst.files)] # pFst by sex
+
+regionCols <- viridis(6, end=0.93)
+pFstCols <- c(regionCols[1], regionCols[5])
+
+# everysecond <- function(x){
+#   x <- sort(unique(x))
+#   x[seq(2, length(x), 2)] <- ""
+#   x
+# }
+
+pFst.List <- list()
+for (FILE in pFst.files){ # Change if all or by sex!
+  pfst <- as.data.frame(read.table(FILE))
+  POP <- unlist(strsplit(FILE, "[/|,.,_]+"))[c(7:8)] %>% paste(collapse=".") 
+  #POP <- unlist(strsplit(FILE, "[/|,.,_]+"))[c(7:9)] %>% paste(collapse=".") # by sex
+  dfName <- paste(POP, 'pFst', sep = '.' )
+  pltName <- paste('plot', POP, sep = '.' )
+  #pltName2 <- paste('plot', POP, sep = '.' )
+  colnames(pfst) <- c("Chr", "pos", "pFst")
+  level_key <- c(NC_044244.1 = "1", NC_044245.1= "2", NC_044246.1= "3", NC_044247.1= "4", NC_044248.1= "4A", NC_044250.1= "5", NC_044249.1= "4B", NC_044252.1= "6", NC_044253.1= "7", NC_044251.1= "5A", NC_044254.1= "8", NC_044255.1= "9", NC_044256.1= "10", NC_044257.1= "11", NC_044258.1= "12", NC_044259.1= "13", NC_044260.1= "14", NC_044261.1= "15", NC_044262.1= "17", NC_044263.1= "18", NC_044264.1= "19", NC_044265.1= "20", NC_044266.1= "21", NC_044267.1= "22", NC_044268.1= "23", NC_044269.1= "24", NC_044270.1= "25", NC_044271.1= "26", NC_044272.1= "27", NC_044273.1= "28", NC_044275.1= "33")
+
+  pfst$Chr <- recode(pfst$Chr, !!!level_key)
+  
+  pfst4p <- pfst[pfst$pFst < 0.9,] # prune data for mapping see https://github.com/vcflib/vcflib/blob/master/scripts/plotPfst.R#L15
+  
+  pFst.List[[ dfName ]] <- pfst
+  
+# Plot pFst
+  pfst.don <- pfst4p %>% 
+  # Compute chromosome size
+  group_by(Chr) %>% 
+  dplyr::summarise(chr_len=max(pos)) %>% 
+  # Calculate cumulative position of each chromosome
+  mutate(tot=cumsum(chr_len)-chr_len) %>%
+  dplyr::select(-chr_len) %>%
+  # Add this info to the initial dataset
+  left_join(pfst4p, ., by=c("Chr"="Chr")) %>%
+  # Add a cumulative position of each SNP
+  arrange(Chr, pos) %>%
+  mutate(pfst.POS=pos+tot)
+pfst.axisdf = pfst.don %>% group_by(Chr) %>% summarize(center=( max(pfst.POS) + min(pfst.POS) ) / 2 )
+
+pFst.List[[ pltName ]] <- ggplot(pfst.don, aes(x=pfst.POS, y=-log10(pFst))) +
+    # Show all points
+    geom_point( aes(color=as.factor(Chr)), alpha=0.5, size=1.3) +
+    scale_color_manual(values = rep(c("grey", "purple4"), 22 )) + 
+    # custom X axis:
+    scale_x_continuous( label = pfst.axisdf$Chr, breaks= pfst.axisdf$center, guide =guide_axis(n.dodge=2) ) +
+    #scale_x_continuous( label = as.numeric(everysecond(pfst.axisdf$Chr)), breaks= as.numeric(everysecond(pfst.axisdf$center)) ) +
+    scale_y_continuous(expand = c(0, 0) ) +     # remove space between plot area and x axis
+  ylim(0,4.5) + # so all pops are on the same y scale
+    # Custom the theme:
+    theme_bw() + labs(title =POP) + xlab(NULL) +
+    theme( 
+      legend.position="none",
+      panel.border = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.text.x = element_text(angle = 45, size = 12),
+      axis.text.y = element_text(size = 12),
+      axis.title.y = element_text(size = 12)
+    )
+}
+
+WB.sum <- pFst.List$WAS.BAY.pFst %>% group_by(Chr) %>% summarize(meanPfst=mean(pFst), sdPfst=sd(pFst))
+PE.sum <- pFst.List$PAC.EAS.pFst %>% group_by(Chr) %>% summarize(meanPfst=mean(pFst),  sdPfst=sd(pFst))
+
+#pFst.all <- cowplot::plot_grid(pFst.List$plot.WAS.BAY, pFst.List$plot.PAC.EAS, ncol = 1)
+
+
+#ggsave(filename="~/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovAutos_pFST_WAS.BAY_5-4-2021.png", width=20, height=4, units="in",WB.p)
+#ggsave(filename="~/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovAutos_pFST_PAC.EAS_5-4-2021.png", width=20, height=4, units="in",PE.p)
+
+```
+
+![pFst WAS.BAY results](/Users/neasci/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovAutos_pFST_WAS.BAY_5-4-2021.png){#id .class width=100% height=100%}
+
+&nbsp;
+
+![pFst PAC.EAS results](/Users/neasci/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovAutos_pFST_PAC.EAS_5-4-2021.png){#id .class width=100% height=100%}
+
+&nbsp;
+
+### pFst overlapping SNPs
+```{r, warning=FALSE, message=FALSE}
+pe.q <- quantile(pFst.List$PAC.EAS.pFst$pFst, 0.01) # make sure these are based on all the data not on the > 0.9 pruned data for mapping...
+wb.q <- quantile(pFst.List$WAS.BAY.pFst$pFst, 0.01)
+
+pe.out <- pFst.List$PAC.EAS.pFst %>% filter(pFst < pe.q)
+wb.out <- pFst.List$WAS.BAY.pFst %>% filter(pFst < wb.q)
+
+pe.out$cp <- paste(pe.out$Chr, pe.out$pos, sep = ".")
+wb.out$cp <- paste(wb.out$Chr, wb.out$pos, sep = ".")
+
+match.out <- inner_join(wb.out, pe.out, by=c("Chr", "pos", "cp")) # 6079 SNPs
+
+# expected overlap: take the total number of snps from the 2 pFst comparisons (WAS.BAY+PAC.EAS) and calculate 1% because that was my quantile cutoff, then calculate 1% of the 1% to say how many snps we expect at 1% overlap between the two comparisons
+# No. of SNPs
+pe.snps <- dim(pFst.List$PAC.EAS.pFst)[1]
+wb.snps <- dim(pFst.List$WAS.BAY.pFst)[1]
+
+exp <- (pe.snps+wb.snps) *0.01 *0.01
+
+# % difference bt expected and observed?
+dif <- dim(match.out)[1] - exp
+p.diff <- dif/(pe.snps+wb.snps)*100
+
+lap.tab <- t(as.data.frame(c(exp, dim(match.out)[1]))) 
+colnames(lap.tab) <- c("Expected", "Observed")
+rownames(lap.tab) <- c("SNPs")
+lap.tab <- as.data.frame(lap.tab)
+
+kable(lap.tab, digits = 2, caption = "Overlapping SNPs between WAS.BAY, PAC.EAS pFst") %>% kable_styling()
+
+```
+
+
+&nbsp;
+&nbsp;
+
+## Selection - SweeD
+```{r, warning=FALSE, message=FALSE}
+#maybe try this website for cutoffs and plotting tips: https://rstudio-pubs-static.s3.amazonaws.com/420748_806b76c619634f9a906619a9b95552aa.html
+sweed <- readRDS("~/Documents/ANHU/popGenResults/ALL.sweed.rds")
+sweed$Position <- as.numeric(sweed$Position)
+sweed$Likelihood <- as.numeric(sweed$Likelihood)
+sweed <- sweed %>% drop_na()
+
+level_key2 <- c(NC_044244 = "1", NC_044245= "2", NC_044246= "3", NC_044247= "4", NC_044248= "4A", NC_044250= "5", NC_044249= "4B", NC_044252= "6", NC_044253= "7", NC_044251= "5A", NC_044254= "8", NC_044255= "9", NC_044256= "10", NC_044257= "11", NC_044258= "12", NC_044259= "13", NC_044260= "14", NC_044261= "15", NC_044262= "17", NC_044263= "18", NC_044264= "19", NC_044265= "20", NC_044266= "21", NC_044267= "22", NC_044268= "23", NC_044269= "24", NC_044270= "25", NC_044271= "26", NC_044272= "27", NC_044273= "28", NC_044275= "33")
+
+  sweed$chr <- recode(sweed$chr, !!!level_key2)
+  sweed$chr <- factor(sweed$chr, levels = c("1", "2", "3", "4", "4A", "4B", "5", "5A", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "33"))
+  
+line99 <- quantile(sweed$Likelihood, 0.999)
+  
+#sweed <- sweed %>% sample_frac(0.1, replace = FALSE)
+
+
+sweed.don <- sweed %>% 
+  # Compute chromosome size
+  group_by(chr) %>% 
+  dplyr::summarise(chr_len=max(Position)) %>% 
+  # Calculate cumulative position of each chromosome
+  mutate(sw.tot=cumsum(chr_len)-chr_len) %>%
+  dplyr::select(-chr_len) %>%
+  # Add this info to the initial dataset
+  left_join(sweed, ., by=c("chr"="chr")) %>%
+  # Add a cumulative position of each SNP
+  arrange(chr, Position) %>%
+  mutate(sweed.POS=Position+sw.tot)
+sweed.axisdf = sweed.don %>% group_by(chr) %>% summarize(center=( max(sweed.POS) + min(sweed.POS) ) / 2 )
+
+sweed.p <- ggplot(sweed.don, aes(x=sweed.POS, y=Likelihood)) +
+    # Show all points
+    geom_point( aes(color=as.factor(chr)), alpha=0.8, size=1.3, show.legend = F) +
+    scale_color_manual(values = rep(c("grey", "deeppink3"), 22 )) +
+    # custom X axis:
+    scale_x_continuous(label = sweed.axisdf$chr, breaks= sweed.axisdf$center, guide =guide_axis(n.dodge=2) ) +
+    scale_y_continuous(expand = c(0, 0) ) +     # remove space between plot area and x axis
+  ylim(0,2) + # so all pops are on the same y scale
+    # Custom the theme:
+    theme_bw() + labs(title ="") + xlab(NULL) +
+    theme( 
+      legend.position="none",
+      panel.border = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.text.x = element_text(angle = 45, size = 12),
+      axis.text.y = element_text(size = 12),
+      axis.title.y = element_text(size = 12)
+    )
+
+sweed.p2 <- sweed.p + geom_hline(yintercept = line99, color="black", linetype="dashed")
+
+sweed.p
+```
+
+&nbsp;
+&nbsp;
+
+## Figures - Main
+```{r, warning=FALSE, message=FALSE}
+# Figure 1: Map + K2admix + PCA + IBD
+patch <-  cibd/ pltList2$plot.K2/ pca.243.p23+ theme(legend.position = "none")
+map.meta + patch + plot_annotation(tag_levels = 'A')
+
+# Figure 2: pFst + sweep
+pFst1 <- image_read("/Users/neasci/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovAutos_pFST_WAS.BAY_5-4-2021.png")
+pFst2 <- image_read("/Users/neasci/Documents/ANHU/popGenResults/ANHU_rmfailedYspYlowcovAutos_pFST_PAC.EAS_5-4-2021.png")
+pFst1.gr <- rasterGrob(pFst1)
+pFst2.gr <- rasterGrob(pFst2)
+#ggarrange(pFst1.gr, pFst2.gr, sweed.p, ncol=1, labels = "AUTO")
+
+fig2 <-cowplot::plot_grid(pFst.List$plot.WAS.BAY, pFst.List$plot.PAC.EAS, sweed.p, ncol=1, labels = "AUTO")
+#ggsave(filename="~/Documents/ANHU/ms/pFst+sweed.png", width=20, height=6, units="in",fig2)
+
+
+# Figure 3: nucDiv + Slatkin
+slat.i <- image_read("/Users/neasci/Documents/ANHU/popGenResults/slatkinMap_5-14-2021.png")
+# slat.i2 <- image_crop(slat.i, "1350x1140+330+60") #widthxheight
+# slat.i3 <- image_scale(slat.i2, "600")
+slat.gr <- rasterGrob(slat.i)
+
+ggarrange(grid.arrange(theta.mean.p,my_g1,heights=c(11,0.9)), slat.gr, labels = "AUTO")
+ 
+```
+
+&nbsp;
+&nbsp;
+
+## Figures - Supp
+![Species id tree](/Users/neasci/Documents/ANHU/ANHU_trees/Sept 2019 Updated Tree_orig length_49.png){#id .class width=50% height=75%}
+
+```{r, warning=FALSE, message=FALSE}
+# Figure S2
+allplot <- grid.arrange(heats.p,my_grob,heights=c(11,0.9))
+grid.draw(allplot)
+
+# Figure S3
+admix.pK3_5 <- ggarrange(pltList2$plot.K3 + theme(axis.title.y = element_blank(), axis.title.x = element_blank(), strip.text.x = element_blank()),
+          pltList2$plot.K4 + theme(axis.title.y = element_blank(), axis.title.x = element_blank(), strip.text.x = element_blank()),
+          pltList2$plot.K5 + theme(axis.title.y = element_blank(), axis.title.x = element_blank()),
+          ncol = 1, align="h")
+
+admix.pK3_5.2 <- annotate_figure(admix.pK3_5, left = text_grob("Ancestry", rot = 90), bottom = text_grob("Individuals"))
+
+admix.pK3_5.2
+
+# Figure S4
+pca.243.P.p / pca.rm.p2 +plot_annotation(tag_levels = 'A') # add pca by sex pca.243.S.p
+
+# Figure S5
+cowplot::plot_grid(rel.mean.p, all.het.plot, labels = "AUTO", ncol=1)
+```
+
